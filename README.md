@@ -1,5 +1,7 @@
 # infinity-core
 
+> New here? Start with [OVERVIEW.md](OVERVIEW.md): one page on what this is, how a request flows, and what to trust.
+
 A fresh start that combines the best parts of the Infinity projects.
 
 ## What is here
