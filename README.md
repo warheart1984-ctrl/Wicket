@@ -29,7 +29,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (91 pass)
+python -m pytest        # offline tests, no keys needed (152 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -70,6 +70,24 @@ also reports `N allowed without an outcome`: calls still running, never finished
 not be written. The Nova gate and the small runtime record an outcome after every call; if it cannot be
 written the reply is withheld (for a stream, whose text is already out, the gap is reported instead).
 The typed contracts are `contracts/receipt.v2.json` and `contracts/outcome.v1.json`.
+
+### Contracts for the kernel's input and output
+
+`contracts/proposal.v1.json`, `policy.v1.json` and `decision.v1.json` are now strict JSON Schemas like the
+receipt ones: every field is typed, unknown fields are refused, hashes and the verdict are pattern/enum
+checked, and ids and names cannot be empty. Tests check the real thing against them: every fixture, the
+sample policy, what the runtime and Nova build, and the kernel's actual decisions for all three verdicts.
+
+- **The kernel is deliberately more lenient than the contracts.** It ignores unknown fields and answers a wrong
+  version, an unknown effect or risk, or a mismatched policy id with a logged `deny` (`fixtures/deny-unknown-
+  contract-version.v1.json` is exactly that: the contract rejects it, the kernel must deny it). So a proposal
+  that fails the contract is safe to submit; it is just not well formed. The kernel itself does not run the
+  schemas.
+- `effect` and `risk` are plain non-empty strings in the proposal contract, with the known values described
+  in the schema, because the kernel treats an unknown one as a denial, not a malformed request.
+- `payload` must be an object (the kernel accepts any JSON), and `reason_codes` in a decision are upper-case
+  codes rather than a closed list, so a new code does not break old validators.
+- The schema tests need the `jsonschema` package and skip without it.
 
 ### Signed receipts
 
@@ -270,7 +288,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 203 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 209 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -422,4 +440,4 @@ Browser tests need Node with Playwright and Chromium and are skipped when those 
 
 ## Planned
 
-1. Strict JSON contracts for the proposal, policy and decision formats too.
+Nothing is queued right now.

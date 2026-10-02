@@ -1,1 +1,93 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Infinity Proposal v1","type":"object","required":["version","proposal_id","actor","action","target","effect","risk","requires_human_approval","policy_version","payload","evidence_refs"]}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Infinity Proposal v1",
+  "description": "What a caller asks the kernel to judge. The kernel itself is more lenient than this contract: it ignores unknown fields, accepts any JSON payload, and answers a wrong version, an unknown effect or an unknown risk with a logged `deny` rather than a parse error. This contract describes what a well-formed producer sends; a proposal that fails it is still safe to submit, and is expected to be denied.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "proposal_id",
+    "actor",
+    "action",
+    "target",
+    "effect",
+    "risk",
+    "requires_human_approval",
+    "policy_version",
+    "payload",
+    "evidence_refs"
+  ],
+  "properties": {
+    "version": {
+      "const": "infinity.proposal.v1"
+    },
+    "proposal_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effect": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The kernel knows read, write, deploy, authority_change and audit_delete. Anything else is denied as UNKNOWN_EFFECT; deploy, authority_change and audit_delete are always denied as FORBIDDEN_EFFECT."
+    },
+    "risk": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The kernel knows low, medium, high and critical. Anything else is denied as UNKNOWN_RISK."
+    },
+    "requires_human_approval": {
+      "type": "boolean"
+    },
+    "policy_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Must equal the policy's policy_id, or the proposal is denied as POLICY_MISMATCH."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Free-form facts about the request. Never the content itself (Nova sends sizes and a hash). A `verdict` key is refused by the kernel: a proposal cannot choose its own verdict."
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "References to evidence for the request."
+    },
+    "approval_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "description": "Set only when re-submitting a request a human approved. Not part of the hash a human approval is bound to."
+    }
+  }
+}
