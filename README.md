@@ -29,7 +29,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (81 pass)
+python -m pytest        # offline tests, no keys needed (91 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -105,13 +105,60 @@ infinityctl verify-log --log LOG --anchor A --trusted-keys signing.pub --require
   the local check passing and the published check failing).
 - The private key is a file on the machine that writes the log. Anyone who can read it, which includes the
   Nova process and its user, can sign forgeries. Signing protects against tampering with *stored* files
-  (backups, other accounts, a copied repository), not against a compromised writer. Running the signer as a
-  separate process under another user is not built yet.
+  (backups, other accounts, a copied repository), not against a compromised writer. The signer service
+  below fixes that, if you run it as another account.
 - Signatures prove who wrote an entry, not that the clock was right.
 
 Typed contracts: `contracts/receipt.v2.json`, `contracts/outcome.v1.json` and `contracts/anchor.v1.json`
 (the latter two now allow the optional `key_id` and `signature`). The kernel gains one dependency,
 `ed25519-dalek`; the command-line tool gains `getrandom` for key generation.
+
+### Keeping the key out of Nova: the signer service
+
+With the steps above, Nova runs `infinityctl` itself, so Nova's account can read the key. The signer
+service moves the kernel, the policy, the key and the log into a different process under a different
+account. Nova asks it over a Unix socket and gets the decision and receipt back.
+
+```bash
+# as the service account (its own user; the key, policy, approvals file and log directory are its alone)
+python -m runtime.ick_service serve --socket /run/ick/ick.sock --policy policy.json \
+    --log /var/lib/ick/receipts.jsonl --anchor /var/lib/ick-anchor/anchor.jsonl \
+    --sign-key /etc/ick/signing.priv --approvals /etc/ick/approvals.jsonl --allow-uid <nova's uid>
+
+# as Nova (no policy, key or binary in its environment: setting any of them next to this is refused)
+NOVA_ICK_SERVICE=/run/ick/ick.sock python -m nova.api
+```
+
+- **Why the service runs the kernel instead of just signing.** A service that signed whatever Nova sent
+  would let a taken-over Nova sign forgeries. Here the verdict is computed with the service's own
+  policy, so Nova cannot make a receipt say `allow` when the policy says otherwise, cannot choose the
+  policy, and cannot edit the log. A test runs the service and a Nova stand-in as two real accounts and
+  checks that the second can get receipts signed but cannot read the key or write the log or policy.
+- **Approvals are checked there too.** An approval id reaches the kernel only if it is in the
+  human-written approvals file, is bound to *this* request's hash (`infinityctl proposal-hash`), has not
+  expired and has not been denied. Nova cannot invent one. Counting uses is still done by Nova alone, so
+  a taken-over Nova can replay an approval that still has uses left, until it expires.
+- **Who may connect.** The socket's file mode (`--socket-mode`, default 660, set before it is bound) is the
+  gate; `--allow-uid` adds a check of the connecting process's uid (Linux). Requests are limited to 1 MiB
+  and 15 s. A stale socket file is replaced; a live one is never taken over.
+- **The operator screen and verification** read the log and anchor files as before (read-only is enough),
+  so those must be readable by their accounts. Keep the anchor where Nova cannot write it, and publish
+  it (see above).
+- **Fail closed.** If the service is down, slow or answers with anything unexpected, the call is refused
+  (`KERNEL_UNAVAILABLE`); if only the outcome cannot be recorded, the reply is withheld as before.
+
+**What it does not do.**
+- It cannot tell whether Nova describes its action truthfully. A taken-over Nova can ask about a harmless
+  read and then do something else; the log proves what was asked and what the policy said, not what was
+  done. Outcomes ("completed", the hashes) are Nova's claim, now signed and chained.
+- Nova can still stop asking, or stop the service from being reachable. Rollback and silence are caught by
+  the published anchor and `watch`, not by the signature.
+- The key is still a file, on the service's machine. There is no hardware key or key store, and no
+  revocation or "valid until" for keys.
+- Nothing starts or supervises the service for you (use systemd or similar), and Nova and the service must
+  be on the same machine (it is a Unix socket).
+- Running it as root, or as the same user as Nova, gives none of this. The test only proves the separation
+  when the two really are different accounts.
 
 ## Log anchor
 
@@ -223,7 +270,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 195 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 203 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -243,7 +290,8 @@ because Groq rejects Python's default one.
 
 Set `NOVA_ICK_POLICY` to a policy file and Nova asks the ICK kernel before it calls a
 model; with it unset nothing changes. Optional: `NOVA_ICK_BIN`, `NOVA_ICK_LOG` (chained
-receipt log) and `NOVA_ICK_ANCHOR` (needs the log).
+receipt log) and `NOVA_ICK_ANCHOR` (needs the log). To keep the key and log away from Nova entirely, set
+`NOVA_ICK_SERVICE` instead (see the signer service).
 
 ```bash
 cargo build
@@ -374,5 +422,4 @@ Browser tests need Node with Playwright and Chromium and are skipped when those 
 
 ## Planned
 
-1. Run the signer as a separate process under another user, so the Nova process never holds the key.
-2. Strict JSON contracts for the proposal, policy and decision formats too.
+1. Strict JSON contracts for the proposal, policy and decision formats too.

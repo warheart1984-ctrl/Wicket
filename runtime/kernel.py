@@ -75,11 +75,30 @@ class Kernel:
         self.anchor = Path(anchor) if anchor else None
         self.binary = binary or find_binary()
 
+    def proposal_hash(self, proposal: dict[str, Any]) -> str:
+        """The hash a human approval is bound to (the proposal's, without any `approval_id`)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "proposal.json"
+            path.write_text(json.dumps(proposal))
+            done = subprocess.run([self.binary, "proposal-hash", "--proposal", str(path)],
+                                  capture_output=True, text=True, timeout=30)
+        if done.returncode != 0:
+            raise KernelError(done.stderr.strip() or f"infinityctl exited {done.returncode}")
+        return done.stdout.strip()
+
     def evaluate(self, proposal: dict[str, Any]) -> Decision:
+        out = self.evaluate_raw(proposal)
+        decision, receipt = out["decision"], out["receipt"]
+        return Decision(decision["verdict"], list(decision.get("reason_codes") or []), receipt)
+
+    def evaluate_raw(self, proposal: dict[str, Any], approval_ids: tuple[str, ...] = ()) -> dict[str, Any]:
+        """Run the kernel and return its whole answer: {"decision": ..., "receipt": ...}."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "proposal.json"
             path.write_text(json.dumps(proposal))
             cmd = [self.binary, "evaluate", "--proposal", str(path), "--policy", str(self.policy)]
+            for approval_id in approval_ids:
+                cmd += ["--approval", approval_id]
             if self.sign_key:
                 cmd += ["--sign-key", str(self.sign_key)]
             if self.receipt_log:
@@ -91,9 +110,7 @@ class Kernel:
             done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if done.returncode != 0:
             raise KernelError(done.stderr.strip() or f"infinityctl exited {done.returncode}")
-        out = json.loads(done.stdout)
-        decision, receipt = out["decision"], out["receipt"]
-        return Decision(decision["verdict"], list(decision.get("reason_codes") or []), receipt)
+        return json.loads(done.stdout)
 
     def record_outcome(
         self,
