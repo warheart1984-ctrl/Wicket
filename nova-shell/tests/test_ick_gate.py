@@ -141,8 +141,9 @@ def test_api_returns_the_kernel_receipt_when_allowed(client, monkeypatch, tmp_pa
     monkeypatch.setenv("NOVA_ICK_LOG", str(tmp_path / "r.jsonl"))
     body = client.post("/v1/chat/completions", json=CHAT)
     assert body.status_code == 200
-    assert body.json()["nova"]["ick"]["verdict"] == "allow"
-    assert len((tmp_path / "r.jsonl").read_text().splitlines()) == 1
+    ick = body.json()["nova"]["ick"]
+    assert ick["verdict"] == "allow" and ick["outcome_receipt_id"].startswith("receipt:")
+    assert len((tmp_path / "r.jsonl").read_text().splitlines()) == 2  # the decision, then its outcome
 
 
 NODE = {"task_id": "t1", "payload": {"messages": [{"role": "user", "content": "hi"}]}}

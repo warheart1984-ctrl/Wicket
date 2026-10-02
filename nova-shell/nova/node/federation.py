@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from nova.ick import KernelRefusal, gate_action
+from nova.ick import KernelRefusal, OutcomeNotRecorded, gate_action, gate_outcome
 from nova.node.identity import NodeIdentity, sign_payload, verify_payload_signature
 from nova.node.ledger import append_ledger, runtime_dir
 from nova.node.policy import load_node_policy
@@ -60,7 +60,7 @@ def gossip_to_peers() -> list[dict[str, Any]]:
             continue
         try:
             # Gossip sends this node's identity and policy hash to another server.
-            gate_action(target=f"peer:{endpoint}", action="gossip_to_peer", effect="write")
+            ick = gate_action(target=f"peer:{endpoint}", action="gossip_to_peer", effect="write")
         except KernelRefusal as exc:
             results.append({"peer_id": peer_id, "status": "refused", "error": exc.code})
             continue
@@ -72,9 +72,16 @@ def gossip_to_peers() -> list[dict[str, Any]]:
         )
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
-                results.append({"peer_id": peer_id, "status": response.status})
+                result = {"peer_id": peer_id, "status": response.status}
+            outcome = "completed"
         except (urllib.error.URLError, TimeoutError) as exc:
-            results.append({"peer_id": peer_id, "status": "error", "error": str(exc)})
+            result = {"peer_id": peer_id, "status": "error", "error": str(exc)}
+            outcome = "failed"
+        try:
+            gate_outcome(ick, status=outcome)
+        except OutcomeNotRecorded as exc:  # it was sent; say the record is missing
+            result["outcome_error"] = exc.code
+        results.append(result)
     return results
 
 

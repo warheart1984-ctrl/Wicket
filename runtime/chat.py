@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from runtime.kernel import Decision, Kernel
+from runtime.kernel import Decision, Kernel, KernelError, sha256_text
 from runtime.providers import Client, complete
 
 
@@ -16,6 +17,7 @@ class TurnResult:
     reason_codes: list[str]
     receipt_id: str
     reply: str | None  # None unless the kernel allowed the call
+    outcome_receipt_id: str | None = None  # the record of what the model call did (needs a log)
 
 
 def build_proposal(provider: str, message: str, policy_version: str) -> dict[str, Any]:
@@ -56,5 +58,17 @@ def run_turn(
     if not decision.allowed:
         return TurnResult(decision.verdict, decision.reason_codes, receipt_id, None)
     messages = list(history or []) + [{"role": "user", "content": message}]
-    reply = complete(provider, messages, max_tokens=max_tokens, client=client)
-    return TurnResult(decision.verdict, decision.reason_codes, receipt_id, reply)
+    request_sha = sha256_text(json.dumps([m["content"] for m in messages]))
+    try:
+        reply = complete(provider, messages, max_tokens=max_tokens, client=client)
+    except Exception:
+        try:  # the real error matters more; a missing record shows up as "allowed without an outcome"
+            kernel.record_outcome(receipt_id, status="failed", request_sha256=request_sha)
+        except KernelError:
+            pass
+        raise
+    # No evidence, no answer: if the outcome cannot be recorded, KernelError propagates and the
+    # reply is withheld.
+    outcome = kernel.record_outcome(receipt_id, status="completed", request_sha256=request_sha,
+                                    response_sha256=sha256_text(reply))
+    return TurnResult(decision.verdict, decision.reason_codes, receipt_id, reply, outcome)

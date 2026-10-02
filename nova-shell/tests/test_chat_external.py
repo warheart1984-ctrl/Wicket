@@ -156,7 +156,11 @@ def test_one_kernel_receipt_per_call_not_two(client, model, monkeypatch, tmp_pat
     monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))
     monkeypatch.setenv("NOVA_ICK_LOG", str(log))
     assert client.post("/v1/chat", json=ASK).status_code == 200
-    assert len(log.read_text().splitlines()) == 1  # the adapter does not gate a second time
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    decisions = [e for e in entries if "verdict" in e]
+    # one decision (the adapter does not gate a second time), then the outcome of that one call
+    assert [e["verdict"] for e in decisions] == ["allow"]
+    assert [e["status"] for e in entries if "status" in e] == ["completed"]
     assert len(model.requests) == 1
 
 

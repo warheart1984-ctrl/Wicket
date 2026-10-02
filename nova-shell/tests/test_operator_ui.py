@@ -245,3 +245,25 @@ def test_the_nova_api_still_has_no_route_for_approving():
     from nova.api import app
 
     assert not [r.path for r in app.routes if "approv" in getattr(r, "path", "").lower()]
+
+
+def test_it_shows_outcomes_times_and_allows_that_have_none(tmp_path):
+    import re
+
+    policy = tmp_path / "open.json"
+    policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-open-v1",
+                                  "denied_effects": [], "effects_requiring_approval": []}))
+    (tmp_path / "x").mkdir()
+    operator = Operator(tmp_path / "x")
+    try:
+        gate = IckGate(policy, log=operator.log, anchor=operator.anchor)
+        IckGatedProvider(Fake(), gate).chat_completion({"messages": [{"role": "user", "content": "hi"}]})
+        gate.check(target="fake:m", governed_request={"messages": [{"role": "user", "content": "unfinished"}]})
+        log = state(operator)["log"]
+        assert log["verified"] and log["count"] == 3 and log["outcomes"] == 1
+        assert log["allows_without_outcome"] == 1  # the call that never reported back
+        newest_first = [row["verdict"] for row in log["recent"]]
+        assert newest_first == ["allow", "outcome: completed", "allow"]
+        assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", row["issued_at"]) for row in log["recent"])
+    finally:
+        operator.server.shutdown()

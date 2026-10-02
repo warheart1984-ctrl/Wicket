@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Infinity Receipt v2",
+  "description": "A decision receipt. Its id is the SHA3-256 of every other field below, including issued_at (v1 left issued_at out). Hash-linked, not signed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "receipt_id", "previous_receipt_hash", "proposal_hash", "policy_hash", "decision_hash", "verdict", "reason_codes", "issued_at"],
+  "properties": {
+    "version": { "const": "infinity.receipt.v2" },
+    "receipt_id": { "type": "string", "pattern": "^receipt:sha3-256:[0-9a-f]{64}$" },
+    "previous_receipt_hash": { "type": ["string", "null"], "pattern": "^receipt:sha3-256:[0-9a-f]{64}$" },
+    "proposal_hash": { "type": "string", "pattern": "^sha3-256:[0-9a-f]{64}$" },
+    "policy_hash": { "type": "string", "pattern": "^sha3-256:[0-9a-f]{64}$" },
+    "decision_hash": { "type": "string", "pattern": "^sha3-256:[0-9a-f]{64}$" },
+    "verdict": { "enum": ["allow", "deny", "await_human_approval"] },
+    "reason_codes": { "type": "array", "items": { "type": "string" } },
+    "issued_at": { "type": "string", "description": "RFC 3339 UTC, e.g. 2026-10-02T10:15:00Z. Supplied by the caller of the kernel; covered by the hash." }
+  }
+}
