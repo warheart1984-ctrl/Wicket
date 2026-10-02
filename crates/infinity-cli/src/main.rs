@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 #[cfg(test)]
 use infinity_kernel::Decision;
 use infinity_kernel::{
-    evaluate, issue_outcome, issue_receipt, summarize, verify_log, verify_signatures, ApprovalSet,
-    LogEntry, Policy, Proposal, Signer, TrustedKeys,
+    evaluate, hash_value, issue_outcome, issue_receipt, summarize, verify_log, verify_signatures,
+    ApprovalSet, LogEntry, Policy, Proposal, Signer, TrustedKeys,
 };
 use std::{
     fs,
@@ -74,6 +74,12 @@ enum Command {
         /// Sign the outcome (and the anchor record) with this private key file.
         #[arg(long, env = "INFINITY_SIGN_KEY")]
         sign_key: Option<String>,
+    },
+    /// Print the hash a human approval is bound to: the proposal's hash with any `approval_id`
+    /// removed, which is what the first (waiting) evaluation of that request reports.
+    ProposalHash {
+        #[arg(long)]
+        proposal: String,
     },
     Replay {
         #[arg(long)]
@@ -498,6 +504,13 @@ fn run(command: Command) -> Result<(), String> {
                 }))
                 .expect("JSON")
             );
+            Ok(())
+        }
+        Command::ProposalHash { proposal } => {
+            let mut p: Proposal = read(&proposal)?;
+            p.approval_id = None;
+            let value = serde_json::to_value(&p).map_err(|e| e.to_string())?;
+            println!("{}", hash_value(&value).map_err(|e| e.to_string())?);
             Ok(())
         }
         Command::Replay { fixture } => {

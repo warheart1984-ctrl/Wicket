@@ -4,6 +4,9 @@ Opt-in: set NOVA_ICK_POLICY to a policy file to switch the gate on. Optional:
 NOVA_ICK_BIN (path to infinityctl), NOVA_ICK_LOG (chained receipt log) and
 NOVA_ICK_ANCHOR (anchor file, needs NOVA_ICK_LOG).
 
+Or set NOVA_ICK_SERVICE to the socket of a signer service (runtime/ick_service.py). Then the
+kernel runs in that other process, with its own policy, key and log, and Nova holds none of them.
+
 The gate fails closed: once it is on, a missing binary, a kernel error or any verdict other
 than `allow` stops the model call. Message text is never sent to the kernel, only sizes.
 """
@@ -14,6 +17,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 from pathlib import Path
@@ -87,11 +91,40 @@ def _find_binary(explicit: str | None) -> str:
     )
 
 
+_SERVICE_REPLY_LIMIT = 4 << 20
+
+
+def _call_service(path: Path, request: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    """One request to the signer service (runtime/ick_service.py). Any failure is a refusal."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(timeout)
+            conn.connect(str(path))
+            conn.sendall(json.dumps(request).encode() + b"\n")
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > _SERVICE_REPLY_LIMIT:
+                    raise ValueError("reply too large")
+        reply = json.loads(data)
+        if not isinstance(reply, dict):
+            raise ValueError("reply is not an object")
+    except (OSError, ValueError) as exc:
+        raise KernelRefusal(code="KERNEL_UNAVAILABLE", message=f"signer service: {exc}") from exc
+    if reply.get("ok") is not True or not isinstance(reply.get("result"), dict):
+        raise KernelRefusal(code="KERNEL_UNAVAILABLE", message=f"signer service: {reply.get('error', 'refused')}")
+    return reply["result"]
+
+
 class IckGate:
     def __init__(
         self,
-        policy: str | Path,
+        policy: str | Path | None = None,
         *,
+        service_socket: str | Path | None = None,
         binary: str | None = None,
         log: str | Path | None = None,
         anchor: str | Path | None = None,
@@ -101,9 +134,16 @@ class IckGate:
         if anchor and not log:
             raise ValueError("NOVA_ICK_ANCHOR needs NOVA_ICK_LOG")
         self.approvals = approvals
+        self.service = Path(service_socket) if service_socket else None
+        if self.service is not None and (policy or sign_key or binary or log or anchor):
+            raise ValueError("with a signer service, the policy, key, log and kernel belong to the "
+                             "service: Nova must not be given them")
+        if self.service is None and not policy:
+            raise ValueError("a policy file (or a signer service socket) is required")
+        self._service_policy_id: str | None = None
         # Private key file (mode 0600) used to sign every receipt, outcome and anchor record written.
         self.sign_key = Path(sign_key) if sign_key else None
-        self.policy = Path(policy)
+        self.policy = Path(policy) if policy else Path()
         self.binary = binary
         self.log = Path(log) if log else None
         self.anchor = Path(anchor) if anchor else None
@@ -112,6 +152,14 @@ class IckGate:
     def from_env(cls, env: Any = None) -> "IckGate | None":
         env = os.environ if env is None else env
         policy = (env.get("NOVA_ICK_POLICY") or "").strip()
+        service = (env.get("NOVA_ICK_SERVICE") or "").strip()
+        if service:
+            # The service owns the policy, key, log and anchor. Naming them here too would suggest
+            # Nova can use them, so it is refused. (NOVA_ICK_LOG/ANCHOR are for the operator screen.)
+            if policy or (env.get("NOVA_ICK_SIGN_KEY") or "").strip() or (env.get("NOVA_ICK_BIN") or "").strip():
+                raise ValueError("NOVA_ICK_SERVICE is set: remove NOVA_ICK_POLICY, NOVA_ICK_SIGN_KEY and "
+                                 "NOVA_ICK_BIN from Nova's environment; the signer service owns them")
+            return cls(service_socket=service, approvals=approval_store_from_env(env))
         if not policy:
             return None
         return cls(
@@ -125,6 +173,9 @@ class IckGate:
 
     def _run(self, proposal: dict[str, Any], approval_ids: list[str]) -> dict[str, Any]:
         """Ask the kernel once. Any failure to get an answer is a refusal (fail closed)."""
+        if self.service is not None:
+            return _call_service(self.service, {"op": "evaluate", "proposal": proposal,
+                                                "approval_ids": approval_ids})
         try:
             binary = _find_binary(self.binary)
         except KernelRefusal:
@@ -154,11 +205,33 @@ class IckGate:
             )
         return json.loads(done.stdout)
 
+    def _policy_id(self) -> str:
+        if self.service is not None:
+            if self._service_policy_id is None:
+                policy_id = _call_service(self.service, {"op": "info"}).get("policy_id")
+                if not isinstance(policy_id, str) or not policy_id:
+                    raise KernelRefusal(code="KERNEL_UNAVAILABLE", message="signer service gave no policy id")
+                self._service_policy_id = policy_id
+            return self._service_policy_id
+        try:
+            return str(json.loads(self.policy.read_text())["policy_id"])
+        except Exception as exc:
+            raise KernelRefusal(code="KERNEL_UNAVAILABLE", message=f"cannot read policy: {exc}") from exc
+
     def record_outcome(self, ick: dict[str, str], *, status: str, response_text: str | None) -> str | None:
         """Append an outcome entry (completed / failed) for the allow described by `ick`.
 
         Returns its receipt id, or None when no receipt log is configured (nothing to chain to).
         Raises OutcomeNotRecorded if it cannot be written."""
+        if self.service is not None:
+            try:
+                result = _call_service(self.service, {
+                    "op": "record_outcome", "decision_receipt": ick["receipt_id"], "status": status,
+                    "request_sha256": ick.get("request_sha256"),
+                    "response_sha256": sha256_text(response_text) if response_text is not None else None})
+                return str(result["outcome"]["receipt_id"])
+            except (KernelRefusal, KeyError, TypeError) as exc:
+                raise OutcomeNotRecorded(getattr(exc, "message", None) or str(exc)) from exc
         if self.log is None:
             return None
         try:
@@ -198,10 +271,7 @@ class IckGate:
         A verdict that needs a human is cleared only by a matching approval (see
         nova/ick_approvals.py); otherwise the request is parked as pending and refused.
         """
-        try:
-            policy_id = json.loads(self.policy.read_text())["policy_id"]
-        except Exception as exc:
-            raise KernelRefusal(code="KERNEL_UNAVAILABLE", message=f"cannot read policy: {exc}") from exc
+        policy_id = self._policy_id()
         proposal = build_proposal(
             policy_id=policy_id, target=target, governed_request=governed_request,
             action=action, effect=effect, risk=risk,
