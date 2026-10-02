@@ -258,6 +258,7 @@ def test_the_loop_stops_when_asked(system, remote):
     assert not runner.is_alive() and read_status(system["status"])["last_success_at"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Windows cannot deliver SIGTERM/SIGINT to another process; terminate() kills it outright")
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_the_command_stops_cleanly_on_a_signal(system, remote, sig):
     system["turns"]()

@@ -272,6 +272,7 @@ def test_gossip_can_be_approved_like_any_other_action(tmp_path, monkeypatch):
     assert federation.gossip_to_peers()[0]["status"] == "refused"  # one use only
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the stand-in binary is a #! script, which Windows cannot run")
 def test_the_gate_trusts_the_kernels_answer_not_its_own_bookkeeping(policy, store, tmp_path):
     """A valid approval is on file, but the kernel (here a stand-in) still says 'await'.
     The call must stay refused: Nova never overrides the kernel's verdict."""
@@ -447,3 +448,24 @@ def test_the_gate_parks_an_expired_request_again_and_it_can_then_be_approved(pol
     assert [r["proposal_hash"] for r in store.pending()] == [h]
     store.approve(h, approved_by="alice")
     assert provider.chat_completion(request())["ick"]["approved_by"] == "alice"
+
+
+def test_a_confirmation_prompt_with_no_input_refuses_instead_of_crashing(store, monkeypatch, capsys):
+    """Windows reports the NUL device as a terminal, so `input()` can hit end-of-file."""
+    import argparse
+
+    import nova.cli as cli_module
+
+    store.record_pending(proposal_hash="h1", summary={"action": "a", "target": "t", "effect": "read", "risk": "low"})
+    monkeypatch.setattr(cli_module, "_approval_store", lambda: store)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+    def eof(_prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+    approve = argparse.Namespace(proposal_hash="h1", by="alice", expires_in=60, uses=1, yes=False)
+    deny = argparse.Namespace(proposal_hash="h1", by="alice", reason="", yes=False)
+    assert cli_module.approve_command(approve) == 1 and "--yes" in capsys.readouterr().err
+    assert cli_module.deny_command(deny) == 1 and "--yes" in capsys.readouterr().err
+    assert not store.approvals_file.exists() and not store.denials_file.exists()

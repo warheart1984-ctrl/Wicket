@@ -85,6 +85,7 @@ def test_without_a_key_nothing_is_signed_as_before(setup):
     assert not any("signature" in e for e in lines(setup["log"]))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Unix file modes; the key-file check is a no-op elsewhere (see README)")
 def test_a_key_file_others_can_read_stops_the_call_before_the_model_runs(setup):
     os.chmod(setup["private"], 0o644)
     inner = Provider()

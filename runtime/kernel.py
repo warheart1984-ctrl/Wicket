@@ -14,6 +14,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POLICY = ROOT / "demo" / "policy.json"
+EXE = "infinityctl.exe" if os.name == "nt" else "infinityctl"  # what `cargo build` produces
 
 
 class KernelError(RuntimeError):
@@ -39,8 +40,8 @@ class Decision:
 def find_binary() -> str:
     candidates = [
         os.getenv("INFINITYCTL", ""),
-        str(ROOT / "target" / "release" / "infinityctl"),
-        str(ROOT / "target" / "debug" / "infinityctl"),
+        str(ROOT / "target" / "release" / EXE),
+        str(ROOT / "target" / "debug" / EXE),
         shutil.which("infinityctl") or "",
     ]
     for candidate in candidates:
