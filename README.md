@@ -42,12 +42,31 @@ intact, then appends a receipt linked to the previous one. `infinityctl verify-l
 --log FILE` (or `Kernel.verify()` in Python) checks the whole chain. If the log has
 been edited, the runtime refuses to take another turn and calls no provider.
 
-What the chain catches: an edited receipt, or one removed from the start or middle.
-What it does **not** catch: receipts deleted from the **end** of the log. Nothing
-records how long the log should be. Closing that needs an external anchor, such as
-publishing the latest receipt id somewhere the log's owner cannot rewrite.
+What the chain alone catches: an edited receipt, or one removed from the start or
+middle. What it does **not** catch: receipts deleted from the **end**, because nothing
+records how long the log should be.
+
+## Log anchor
+
+An anchor closes that gap. With `--anchor FILE`, every turn also appends a record of
+the log's length and latest receipt id to a separate file. From then on:
+
+- `infinityctl verify-log --log LOG --anchor FILE` fails if the log is shorter than an
+  anchor ("receipts were deleted") or if the receipt at an anchored position changed
+  ("the log was rewritten").
+- `infinityctl evaluate --log LOG --anchor FILE` refuses to append to a log that fails
+  that check, so a truncated log cannot quietly be continued.
+- In Python, `Kernel(receipt_log=..., anchor=...)` does the same, and a refused turn
+  calls no provider. CLI: `python -m runtime "hi" --receipts LOG --anchor FILE`.
+
+**The anchor is only as strong as where you keep it.** If whoever can edit the receipt
+log can also edit the anchor file, nothing is gained. Keep it on another machine or
+account, in an append-only store, or in a separate repository you commit to. The
+runtime cannot do this for you, so `--anchor` is opt-in and has no default location.
+An attacker who can edit both files can still erase history; the anchor raises the
+bar, it is not a proof.
 
 ## Planned
 
-1. An external anchor for the latest receipt id, to detect tail deletion.
+1. A helper that copies the latest anchor to an external place (a separate git repo).
 2. A minimal operator surface.

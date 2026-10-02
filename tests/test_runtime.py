@@ -100,3 +100,22 @@ def test_tampering_is_detected_and_blocks_further_turns(tmp_path):
     with pytest.raises(KernelError, match="failed verification"):
         run_turn("three", "groq", kernel, client=client)
     assert len(client.calls) == 2  # the blocked turn never reached the provider
+
+
+def test_anchor_catches_deleted_tail_that_the_chain_alone_misses(tmp_path):
+    log, anchor, client = tmp_path / "r.jsonl", tmp_path / "anchors" / "a.jsonl", FakeClient()
+    kernel = Kernel(receipt_log=log, anchor=anchor)
+    for text in ("one", "two", "three"):
+        run_turn(text, "groq", kernel, client=client)
+    assert kernel.verify() is True
+    log.write_text("\n".join(log.read_text().splitlines()[:2]) + "\n")  # drop the last receipt
+    assert Kernel(receipt_log=log).verify() is True  # chain only: fooled
+    assert kernel.verify() is False  # chain + anchor: caught
+    with pytest.raises(KernelError, match="deleted"):
+        run_turn("four", "groq", kernel, client=client)
+    assert len(client.calls) == 3  # the refused turn never reached the provider
+
+
+def test_anchor_requires_a_log():
+    with pytest.raises(KernelError, match="anchor needs"):
+        Kernel(anchor=Path("a.jsonl"))

@@ -49,9 +49,14 @@ class Kernel:
         policy: Path = DEFAULT_POLICY,
         receipt_log: Path | None = None,
         binary: str | None = None,
+        anchor: Path | None = None,
     ) -> None:
+        if anchor and not receipt_log:
+            raise KernelError("an anchor needs a receipt log")
         self.policy = Path(policy)
         self.receipt_log = Path(receipt_log) if receipt_log else None
+        # Keep the anchor where whoever can edit the receipt log cannot also edit it.
+        self.anchor = Path(anchor) if anchor else None
         self.binary = binary or find_binary()
 
     def evaluate(self, proposal: dict[str, Any]) -> Decision:
@@ -62,6 +67,9 @@ class Kernel:
             if self.receipt_log:
                 self.receipt_log.parent.mkdir(parents=True, exist_ok=True)
                 cmd += ["--log", str(self.receipt_log)]  # the CLI chains and appends the receipt
+                if self.anchor:
+                    self.anchor.parent.mkdir(parents=True, exist_ok=True)
+                    cmd += ["--anchor", str(self.anchor)]
             done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if done.returncode != 0:
             raise KernelError(done.stderr.strip() or f"infinityctl exited {done.returncode}")
@@ -70,13 +78,10 @@ class Kernel:
         return Decision(decision["verdict"], list(decision.get("reason_codes") or []), receipt)
 
     def verify(self) -> bool:
-        """True if the receipt log is an unbroken, untampered chain."""
+        """True if the receipt log is an unbroken chain that matches its anchor (if any)."""
         if not self.receipt_log or not self.receipt_log.exists():
             raise KernelError("no receipt log to verify")
-        done = subprocess.run(
-            [self.binary, "verify-log", "--log", str(self.receipt_log)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return done.returncode == 0
+        cmd = [self.binary, "verify-log", "--log", str(self.receipt_log)]
+        if self.anchor:
+            cmd += ["--anchor", str(self.anchor)]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).returncode == 0
