@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Infinity Anchor v1",
+  "description": "One line of an anchor file: the log's length and its newest entry at that moment. When signed, forging or editing a record needs the key.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "count",
+    "head_receipt_id"
+  ],
+  "properties": {
+    "version": {
+      "const": "infinity.anchor.v1"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "head_receipt_id": {
+      "type": "string",
+      "pattern": "^receipt:sha3-256:[0-9a-f]{64}$"
+    },
+    "key_id": {
+      "type": "string",
+      "pattern": "^key:sha3-256:[0-9a-f]{64}$",
+      "description": "Present only on signed entries; names the public key to check the signature with."
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^ed25519:[0-9a-f]{128}$",
+      "description": "Ed25519 over the entry id with a domain prefix. Not part of the hash. Needs a trusted public key to mean anything."
+    }
+  }
+}

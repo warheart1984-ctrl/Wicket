@@ -1,7 +1,8 @@
+use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha3::{Digest, Sha3_256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 pub const PROPOSAL_VERSION: &str = "infinity.proposal.v1";
@@ -88,6 +89,11 @@ pub struct Receipt {
     pub verdict: String,
     pub reason_codes: Vec<String>,
     pub issued_at: String,
+    /// Set when the receipt was signed. Not part of the hash: the signature is over the hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 /// What happened after an `allow`: written to the same chain, so "the model was called" has a
 /// record that points at the decision which permitted it. Only hashes are stored, never content.
@@ -101,6 +107,10 @@ pub struct Outcome {
     pub request_sha256: Option<String>,
     pub response_sha256: Option<String>,
     pub issued_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 /// One line of a receipt log: a decision receipt or an outcome.
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +152,36 @@ impl LogEntry {
         match self {
             LogEntry::Decision(r) => &r.receipt_id,
             LogEntry::Outcome(o) => &o.receipt_id,
+        }
+    }
+    pub fn key_id(&self) -> Option<&str> {
+        match self {
+            LogEntry::Decision(r) => r.key_id.as_deref(),
+            LogEntry::Outcome(o) => o.key_id.as_deref(),
+        }
+    }
+    pub fn signature(&self) -> Option<&str> {
+        match self {
+            LogEntry::Decision(r) => r.signature.as_deref(),
+            LogEntry::Outcome(o) => o.signature.as_deref(),
+        }
+    }
+    pub fn is_signed(&self) -> bool {
+        self.signature().is_some()
+    }
+    /// Sign this entry in place. Call after the entry's id is final: the signature is over the id.
+    pub fn sign(&mut self, signer: &Signer) {
+        let signature = signer.sign_entry(self.receipt_id());
+        let key_id = Some(signer.key_id().to_string());
+        match self {
+            LogEntry::Decision(r) => {
+                r.key_id = key_id;
+                r.signature = Some(signature);
+            }
+            LogEntry::Outcome(o) => {
+                o.key_id = key_id;
+                o.signature = Some(signature);
+            }
         }
     }
     pub fn previous_receipt_hash(&self) -> Option<&str> {
@@ -365,6 +405,8 @@ pub fn issue_receipt(
         verdict: decision.verdict.clone(),
         reason_codes: decision.reason_codes.clone(),
         issued_at,
+        key_id: None,
+        signature: None,
     };
     let material = receipt_material(&receipt).ok_or_else(|| {
         KernelError::Invalid("cannot issue a receipt of an unknown version".into())
@@ -413,6 +455,8 @@ pub fn issue_outcome(
         request_sha256,
         response_sha256,
         issued_at,
+        key_id: None,
+        signature: None,
     };
     outcome.receipt_id = format!("receipt:{}", hash_value(&outcome_material(&outcome))?);
     Ok(outcome)
@@ -485,6 +529,228 @@ pub fn summarize(entries: &[LogEntry]) -> LogSummary {
         outcomes: entries.len() - decisions,
         allows_without_outcome,
     }
+}
+
+// ---- signatures ------------------------------------------------------------------------------
+//
+// Ed25519 signatures over entries and anchor records. They are *optional*: unsigned entries and
+// old logs verify exactly as before. The signature covers the entry's id, and the id is a hash of
+// every other field, so a valid signature vouches for all of them. A signature stops anyone who
+// lacks the key from forging or altering entries. It does not stop rolling a log back to an
+// earlier genuine state, and it does not help if the key is stolen with the log.
+
+const ENTRY_DOMAIN: &str = "infinity-core/entry/v1";
+const ANCHOR_DOMAIN: &str = "infinity-core/anchor/v1";
+const PRIVATE_PREFIX: &str = "ed25519-private:";
+const PUBLIC_PREFIX: &str = "ed25519-public:";
+const SIGNATURE_PREFIX: &str = "ed25519:";
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+fn from_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
+}
+/// The id of a public key: `key:sha3-256:<hash of the 32 key bytes>`.
+pub fn key_id_for(public_key: &[u8; 32]) -> String {
+    format!("key:sha3-256:{:x}", Sha3_256::digest(public_key))
+}
+fn entry_message(key_id: &str, receipt_id: &str) -> Vec<u8> {
+    format!("{ENTRY_DOMAIN}\n{key_id}\n{receipt_id}").into_bytes()
+}
+fn anchor_message(key_id: &str, count: u64, head_receipt_id: &str) -> Vec<u8> {
+    format!("{ANCHOR_DOMAIN}\n{key_id}\n{count}\n{head_receipt_id}").into_bytes()
+}
+
+/// Holds a private key. Never prints or serializes it.
+pub struct Signer {
+    key: SigningKey,
+    key_id: String,
+}
+impl Signer {
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        let key = SigningKey::from_bytes(&seed);
+        let key_id = key_id_for(&key.verifying_key().to_bytes());
+        Signer { key, key_id }
+    }
+    /// Parse `ed25519-private:<64 hex>` (surrounding whitespace is ignored).
+    pub fn from_text(text: &str) -> Result<Self, KernelError> {
+        text.trim()
+            .strip_prefix(PRIVATE_PREFIX)
+            .and_then(from_hex::<32>)
+            .map(Signer::from_seed)
+            .ok_or_else(|| {
+                KernelError::Invalid(format!("expected {PRIVATE_PREFIX}<64 hex digits>"))
+            })
+    }
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+    /// `ed25519-public:<64 hex>`, the form a trusted-keys file lists.
+    pub fn public_key_text(&self) -> String {
+        format!(
+            "{PUBLIC_PREFIX}{}",
+            to_hex(&self.key.verifying_key().to_bytes())
+        )
+    }
+    pub fn private_key_text(&self) -> String {
+        format!("{PRIVATE_PREFIX}{}", to_hex(&self.key.to_bytes()))
+    }
+    pub fn sign_entry(&self, receipt_id: &str) -> String {
+        let sig = self.key.sign(&entry_message(&self.key_id, receipt_id));
+        format!("{SIGNATURE_PREFIX}{}", to_hex(&sig.to_bytes()))
+    }
+    pub fn sign_anchor(&self, count: u64, head_receipt_id: &str) -> String {
+        let sig = self
+            .key
+            .sign(&anchor_message(&self.key_id, count, head_receipt_id));
+        format!("{SIGNATURE_PREFIX}{}", to_hex(&sig.to_bytes()))
+    }
+}
+
+/// Public keys the verifier trusts. They must come from somewhere the log's writer cannot
+/// change; a key found inside the log proves nothing.
+#[derive(Default)]
+pub struct TrustedKeys {
+    keys: BTreeMap<String, VerifyingKey>,
+}
+impl TrustedKeys {
+    /// One `ed25519-public:<64 hex>` per line; blank lines and `#` comments are ignored.
+    pub fn from_text(text: &str) -> Result<Self, KernelError> {
+        let mut keys = BTreeMap::new();
+        for (n, line) in text.lines().enumerate() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let bytes = line
+                .strip_prefix(PUBLIC_PREFIX)
+                .and_then(from_hex::<32>)
+                .ok_or_else(|| {
+                    KernelError::Invalid(format!(
+                        "trusted keys line {}: expected {PUBLIC_PREFIX}<64 hex digits>",
+                        n + 1
+                    ))
+                })?;
+            let key = VerifyingKey::from_bytes(&bytes).map_err(|_| {
+                KernelError::Invalid(format!(
+                    "trusted keys line {}: not a valid Ed25519 public key",
+                    n + 1
+                ))
+            })?;
+            keys.insert(key_id_for(&bytes), key);
+        }
+        if keys.is_empty() {
+            return Err(KernelError::Invalid(
+                "the trusted keys file lists no keys".into(),
+            ));
+        }
+        Ok(TrustedKeys { keys })
+    }
+    pub fn from_signer(signer: &Signer) -> Self {
+        let mut keys = BTreeMap::new();
+        keys.insert(signer.key_id.clone(), signer.key.verifying_key());
+        TrustedKeys { keys }
+    }
+    pub fn contains(&self, key_id: &str) -> bool {
+        self.keys.contains_key(key_id)
+    }
+    fn check(&self, key_id: &str, message: &[u8], signature: &str) -> bool {
+        let (Some(key), Some(bytes)) = (
+            self.keys.get(key_id),
+            signature
+                .strip_prefix(SIGNATURE_PREFIX)
+                .and_then(from_hex::<64>),
+        ) else {
+            return false;
+        };
+        key.verify_strict(message, &Signature::from_bytes(&bytes))
+            .is_ok()
+    }
+    pub fn verify_entry(&self, key_id: &str, receipt_id: &str, signature: &str) -> bool {
+        self.check(key_id, &entry_message(key_id, receipt_id), signature)
+    }
+    pub fn verify_anchor(
+        &self,
+        key_id: &str,
+        count: u64,
+        head_receipt_id: &str,
+        signature: &str,
+    ) -> bool {
+        self.check(
+            key_id,
+            &anchor_message(key_id, count, head_receipt_id),
+            signature,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureReport {
+    pub signed: usize,
+    pub unsigned: usize,
+}
+
+/// Check the signatures in a log whose hashes `verify_log` has already accepted.
+///
+/// * every signature must verify against a trusted key (an unknown key is a failure);
+/// * once an entry is signed, every later one must be too, so stripping signatures from the end
+///   of a log is caught;
+/// * with `require`, every entry must be signed. Without it, a log that was *never* signed passes,
+///   which also means someone who strips *all* signatures cannot be told from a log that never
+///   had any. Use `require` once signing is switched on.
+pub fn verify_signatures(
+    entries: &[LogEntry],
+    keys: &TrustedKeys,
+    require: bool,
+) -> Result<SignatureReport, KernelError> {
+    let mut signed = 0;
+    for (index, entry) in entries.iter().enumerate() {
+        let position = index + 1;
+        match (entry.key_id(), entry.signature()) {
+            (Some(key_id), Some(signature)) => {
+                if !keys.contains(key_id) {
+                    return Err(KernelError::Invalid(format!(
+                        "entry {position} is signed by a key that is not trusted ({key_id})"
+                    )));
+                }
+                if !keys.verify_entry(key_id, entry.receipt_id(), signature) {
+                    return Err(KernelError::Invalid(format!(
+                        "entry {position} has a signature that does not verify"
+                    )));
+                }
+                signed += 1;
+            }
+            (None, None) => {
+                if require {
+                    return Err(KernelError::Invalid(format!(
+                        "entry {position} is not signed"
+                    )));
+                }
+                if signed > 0 {
+                    return Err(KernelError::Invalid(format!(
+                        "entry {position} is unsigned after signed entries: signatures were stripped, or signing was switched off"
+                    )));
+                }
+            }
+            _ => {
+                return Err(KernelError::Invalid(format!(
+                    "entry {position} has a key id without a signature, or the reverse"
+                )));
+            }
+        }
+    }
+    Ok(SignatureReport {
+        signed,
+        unsigned: entries.len() - signed,
+    })
 }
 
 #[cfg(test)]
@@ -794,5 +1060,265 @@ mod tests {
                     | (LogEntry::Outcome(_), LogEntry::Outcome(_))
             ));
         }
+    }
+
+    // ---- signatures -------------------------------------------------------------------------
+
+    fn signer(n: u8) -> Signer {
+        Signer::from_seed([n; 32])
+    }
+    fn trusting(signers: &[&Signer]) -> TrustedKeys {
+        let text: String = signers.iter().map(|s| s.public_key_text() + "\n").collect();
+        TrustedKeys::from_text(&text).unwrap()
+    }
+    /// allow, outcome, allow: three chained entries, none signed yet.
+    fn chain() -> Vec<LogEntry> {
+        let a = allow_receipt(None, "2026-10-02T10:00:00Z");
+        let a_entry: LogEntry = a.clone().into();
+        let o: LogEntry = issue_outcome(
+            &a.receipt_id,
+            "completed",
+            None,
+            None,
+            Some(&a_entry),
+            "2026-10-02T10:00:01Z".into(),
+        )
+        .unwrap()
+        .into();
+        let b = allow_receipt(Some(&o), "2026-10-02T10:00:02Z");
+        vec![a_entry, o, b.into()]
+    }
+    fn signed_chain(by: &Signer) -> Vec<LogEntry> {
+        let mut entries = chain();
+        for e in entries.iter_mut() {
+            e.sign(by);
+        }
+        entries
+    }
+
+    #[test]
+    fn a_signed_log_verifies_against_the_trusted_key() {
+        let key = signer(1);
+        let entries = signed_chain(&key);
+        assert!(
+            verify_log(&entries).unwrap(),
+            "signing must not disturb the hash chain"
+        );
+        let report = verify_signatures(&entries, &trusting(&[&key]), true).unwrap();
+        assert_eq!(
+            report,
+            SignatureReport {
+                signed: 3,
+                unsigned: 0
+            }
+        );
+    }
+
+    #[test]
+    fn signatures_are_deterministic_and_the_key_id_is_stable() {
+        let (a, b) = (signer(1), signer(1));
+        assert_eq!(a.key_id(), b.key_id());
+        assert_eq!(a.sign_entry("receipt:x"), b.sign_entry("receipt:x"));
+        assert_ne!(a.key_id(), signer(2).key_id());
+        assert!(
+            a.key_id().starts_with("key:sha3-256:")
+                && a.key_id().len() == "key:sha3-256:".len() + 64
+        );
+    }
+
+    #[test]
+    fn the_wrong_key_does_not_verify() {
+        let entries = signed_chain(&signer(1));
+        let err = verify_signatures(&entries, &trusting(&[&signer(2)]), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not trusted"), "{err}");
+    }
+
+    #[test]
+    fn a_key_id_swapped_for_another_trusted_key_fails() {
+        let (one, two) = (signer(1), signer(2));
+        let mut entries = signed_chain(&one);
+        if let LogEntry::Decision(r) = &mut entries[0] {
+            r.key_id = Some(two.key_id().to_string()); // claims to be signed by key two
+        }
+        let err = verify_signatures(&entries, &trusting(&[&one, &two]), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not verify"), "{err}");
+    }
+
+    #[test]
+    fn a_forged_entry_needs_the_key_even_if_the_attacker_recomputes_every_hash() {
+        let key = signer(1);
+        let honest = signed_chain(&key);
+        // The attacker rewrites entry 1 (allow -> deny), recomputes its id, and keeps the old signature.
+        let LogEntry::Decision(original) = &honest[0] else {
+            unreachable!()
+        };
+        let mut forged = original.clone();
+        forged.verdict = "deny".into();
+        forged.receipt_id = format!(
+            "receipt:{}",
+            hash_value(&receipt_material(&forged).unwrap()).unwrap()
+        );
+        let err = verify_signatures(&[forged.into()], &trusting(&[&key]), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not verify"), "{err}");
+    }
+
+    #[test]
+    fn a_damaged_signature_fails() {
+        let key = signer(1);
+        let mut entries = signed_chain(&key);
+        if let LogEntry::Outcome(o) = &mut entries[1] {
+            o.signature = o.signature.as_deref().map(damaged);
+        }
+        assert!(verify_signatures(&entries, &trusting(&[&key]), true).is_err());
+    }
+
+    /// The same signature with its last hex digit changed.
+    fn damaged(signature: &str) -> String {
+        let (head, last) = signature.split_at(signature.len() - 1);
+        format!("{head}{}", if last == "0" { "1" } else { "0" })
+    }
+
+    #[test]
+    fn a_signature_made_for_one_purpose_cannot_be_reused_for_another() {
+        let key = signer(1);
+        // an anchor signature offered as an entry signature, and the reverse
+        let anchor_sig = key.sign_anchor(3, "receipt:x");
+        assert!(!trusting(&[&key]).verify_entry(key.key_id(), "receipt:x", &anchor_sig));
+        let entry_sig = key.sign_entry("receipt:x");
+        assert!(!trusting(&[&key]).verify_anchor(key.key_id(), 3, "receipt:x", &entry_sig));
+        assert!(trusting(&[&key]).verify_anchor(
+            key.key_id(),
+            3,
+            "receipt:x",
+            &key.sign_anchor(3, "receipt:x")
+        ));
+        assert!(!trusting(&[&key]).verify_anchor(
+            key.key_id(),
+            4,
+            "receipt:x",
+            &key.sign_anchor(3, "receipt:x")
+        ));
+    }
+
+    #[test]
+    fn once_signing_starts_every_later_entry_must_be_signed() {
+        let key = signer(1);
+        let mut entries = signed_chain(&key);
+        let LogEntry::Decision(last) = &mut entries[2] else {
+            unreachable!()
+        };
+        last.key_id = None;
+        last.signature = None; // someone strips the newest signature
+        let trusted = trusting(&[&key]);
+        let err = verify_signatures(&entries, &trusted, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsigned after signed"), "{err}");
+    }
+
+    #[test]
+    fn signing_can_be_switched_on_part_way_through_a_log() {
+        let key = signer(1);
+        let mut entries = chain();
+        entries[1].sign(&key);
+        entries[2].sign(&key);
+        let trusted = trusting(&[&key]);
+        assert_eq!(
+            verify_signatures(&entries, &trusted, false).unwrap(),
+            SignatureReport {
+                signed: 2,
+                unsigned: 1
+            }
+        );
+        assert!(
+            verify_signatures(&entries, &trusted, true).is_err(),
+            "require means all of them"
+        );
+    }
+
+    #[test]
+    fn a_log_that_was_never_signed_passes_only_when_signatures_are_not_required() {
+        let entries = chain();
+        let trusted = trusting(&[&signer(1)]);
+        assert_eq!(
+            verify_signatures(&entries, &trusted, false).unwrap(),
+            SignatureReport {
+                signed: 0,
+                unsigned: 3
+            }
+        );
+        assert!(verify_signatures(&entries, &trusted, true).is_err());
+    }
+
+    #[test]
+    fn a_key_id_with_no_signature_is_rejected() {
+        let key = signer(1);
+        let mut entries = signed_chain(&key);
+        if let LogEntry::Decision(r) = &mut entries[0] {
+            r.signature = None;
+        }
+        assert!(verify_signatures(&entries, &trusting(&[&key]), false).is_err());
+    }
+
+    #[test]
+    fn rolling_back_to_an_earlier_genuine_prefix_still_verifies_a_documented_limit() {
+        // Signatures prove who wrote an entry, not that no newer entry existed. Detecting a
+        // rollback needs an external copy of the newest anchor (the published one).
+        let key = signer(1);
+        let entries = signed_chain(&key);
+        let rolled_back = &entries[..2];
+        assert!(verify_log(rolled_back).unwrap());
+        assert!(verify_signatures(rolled_back, &trusting(&[&key]), true).is_ok());
+    }
+
+    #[test]
+    fn unsigned_entries_serialize_exactly_as_before() {
+        let text = serde_json::to_string(&chain()[0]).unwrap();
+        assert!(
+            !text.contains("signature") && !text.contains("key_id"),
+            "{text}"
+        );
+        let signed = serde_json::to_string(&signed_chain(&signer(1))[0]).unwrap();
+        assert!(
+            signed.contains("\"signature\":\"ed25519:")
+                && signed.contains("\"key_id\":\"key:sha3-256:")
+        );
+        let back: LogEntry = serde_json::from_str(&signed).unwrap();
+        assert!(back.is_signed());
+    }
+
+    #[test]
+    fn key_files_must_have_the_right_shape() {
+        let key = signer(7);
+        let again = Signer::from_text(&format!("  {}\n", key.private_key_text())).unwrap();
+        assert_eq!(again.key_id(), key.key_id());
+        for bad in [
+            "",
+            "ed25519-private:abc",
+            &format!("ed25519-public:{}", "0".repeat(64)),
+            &"a".repeat(64),
+            &format!("ed25519-private:{}", "G".repeat(64)),
+        ] {
+            assert!(Signer::from_text(bad).is_err(), "{bad:?}");
+        }
+        let text = format!(
+            "# the operator's key\n\n{}  # primary\n",
+            key.public_key_text()
+        );
+        assert!(TrustedKeys::from_text(&text)
+            .unwrap()
+            .contains(key.key_id()));
+        assert!(TrustedKeys::from_text("# nothing here\n").is_err());
+        assert!(
+            TrustedKeys::from_text(&key.private_key_text()).is_err(),
+            "a private key is not a trusted public key"
+        );
+        assert!(TrustedKeys::from_text("ed25519-public:xyz").is_err());
     }
 }

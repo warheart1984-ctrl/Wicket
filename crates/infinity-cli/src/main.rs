@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
+#[cfg(test)]
+use infinity_kernel::Decision;
 use infinity_kernel::{
-    evaluate, issue_outcome, issue_receipt, summarize, verify_log, ApprovalSet, Decision, LogEntry,
-    Policy, Proposal,
+    evaluate, issue_outcome, issue_receipt, summarize, verify_log, verify_signatures, ApprovalSet,
+    LogEntry, Policy, Proposal, Signer, TrustedKeys,
 };
 use std::{
     fs,
@@ -38,6 +40,17 @@ enum Command {
         /// Keep the anchor file where whoever can edit the log cannot also edit it.
         #[arg(long, requires = "log")]
         anchor: Option<String>,
+        /// Sign the receipt (and the anchor record) with this private key file. The file must not be
+        /// readable by other users. See `keygen`.
+        #[arg(long, env = "INFINITY_SIGN_KEY")]
+        sign_key: Option<String>,
+    },
+    /// Make a signing key pair. Refuses to overwrite files; the private key file is created 0600.
+    Keygen {
+        #[arg(long)]
+        out: String,
+        #[arg(long)]
+        public_out: String,
     },
     /// Record what happened after an `allow`, in the same chained log.
     RecordOutcome {
@@ -58,6 +71,9 @@ enum Command {
         response_sha256: Option<String>,
         #[arg(long)]
         issued_at: Option<String>,
+        /// Sign the outcome (and the anchor record) with this private key file.
+        #[arg(long, env = "INFINITY_SIGN_KEY")]
+        sign_key: Option<String>,
     },
     Replay {
         #[arg(long)]
@@ -69,6 +85,14 @@ enum Command {
         /// Also check the log against this anchor file (detects deleted or rewritten tails).
         #[arg(long)]
         anchor: Option<String>,
+        /// Check signatures against the public keys listed in this file. Keep it somewhere the
+        /// log's writer cannot change; a key found inside the log proves nothing.
+        #[arg(long)]
+        trusted_keys: Option<String>,
+        /// With --trusted-keys: every entry and anchor record must be signed. Use this once
+        /// signing is on, or someone who strips all the signatures goes unnoticed.
+        #[arg(long, requires = "trusted_keys")]
+        require_signatures: bool,
     },
     Demo {
         #[arg(long, default_value = "demo/receipts.live.jsonl")]
@@ -81,9 +105,110 @@ fn read<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
 }
 const ANCHOR_VERSION: &str = "infinity.anchor.v1";
 
+#[cfg(unix)]
+fn check_private_key_mode(path: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)
+        .map_err(|e| format!("{path}: {e}"))?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "{path} can be read by other users (mode {:o}); run: chmod 600 {path}",
+            mode & 0o777
+        ));
+    }
+    Ok(())
+}
+#[cfg(not(unix))]
+fn check_private_key_mode(_path: &str) -> Result<(), String> {
+    Ok(()) // no Unix permission bits to check here; protect the file with the operating system
+}
+
+fn load_signer(path: &str) -> Result<Signer, String> {
+    check_private_key_mode(path)?;
+    let text = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    Signer::from_text(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+fn load_trusted_keys(path: &str) -> Result<TrustedKeys, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    TrustedKeys::from_text(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Create a file that must not already exist. A private key is created readable by its owner only.
+fn create_new(path: &str, contents: &str, private: bool) -> Result<(), String> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut file = options.open(path).map_err(|e| format!("{path}: {e}"))?;
+    writeln!(file, "{contents}").map_err(|e| e.to_string())
+}
+
+/// Existing entries that claim to be signed by *our* key must still verify before we add to the
+/// log. Entries by other keys (an earlier key, after a rotation) are not ours to judge here.
+fn check_own_signatures(
+    entries: &[LogEntry],
+    anchor_text: &str,
+    signer: &Signer,
+) -> Result<(), String> {
+    let own = TrustedKeys::from_signer(signer);
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.key_id() == Some(signer.key_id())
+            && !entry
+                .signature()
+                .is_some_and(|sig| own.verify_entry(signer.key_id(), entry.receipt_id(), sig))
+        {
+            return Err(format!(
+                "refusing to append: entry {} claims our key but its signature does not verify",
+                index + 1
+            ));
+        }
+    }
+    for (n, line) in anchor_text.lines().enumerate() {
+        let Ok(a) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if a["key_id"].as_str() == Some(signer.key_id())
+            && !a["signature"].as_str().is_some_and(|sig| {
+                own.verify_anchor(
+                    signer.key_id(),
+                    a["count"].as_u64().unwrap_or(0),
+                    a["head_receipt_id"].as_str().unwrap_or(""),
+                    sig,
+                )
+            })
+        {
+            return Err(format!(
+                "refusing to append: anchor line {} claims our key but its signature does not verify",
+                n + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Check every anchor in `anchor_text` against `receipts`: the receipt at position `count`
 /// must still be the one that was anchored. A shorter log means receipts were deleted.
 fn check_anchors(receipts: &[LogEntry], anchor_text: &str) -> Result<(), String> {
+    check_anchors_with(receipts, anchor_text, None, false)
+}
+
+/// As `check_anchors`, and with trusted keys also check each record's signature. Like entries,
+/// once an anchor record is signed every later one must be, and `require` demands all of them.
+fn check_anchors_with(
+    receipts: &[LogEntry],
+    anchor_text: &str,
+    keys: Option<&TrustedKeys>,
+    require: bool,
+) -> Result<(), String> {
+    let mut signed_seen = false;
     for (n, line) in anchor_text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -94,6 +219,38 @@ fn check_anchors(receipts: &[LogEntry], anchor_text: &str) -> Result<(), String>
         let head = a["head_receipt_id"].as_str().unwrap_or("");
         if a["version"] != ANCHOR_VERSION || count == 0 || head.is_empty() {
             return Err(format!("anchor line {} is malformed", n + 1));
+        }
+        if let Some(keys) = keys {
+            let line_no = n + 1;
+            match (a["key_id"].as_str(), a["signature"].as_str()) {
+                (Some(key_id), Some(signature)) => {
+                    if !keys.contains(key_id) {
+                        return Err(format!(
+                            "anchor line {line_no} is signed by a key that is not trusted ({key_id})"
+                        ));
+                    }
+                    if !keys.verify_anchor(key_id, count as u64, head, signature) {
+                        return Err(format!(
+                            "anchor line {line_no} has a signature that does not verify"
+                        ));
+                    }
+                    signed_seen = true;
+                }
+                (None, None) if require => {
+                    return Err(format!("anchor line {line_no} is not signed"))
+                }
+                (None, None) if signed_seen => {
+                    return Err(format!(
+                        "anchor line {line_no} is unsigned after signed ones: signatures were stripped, or signing was switched off"
+                    ))
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(format!(
+                        "anchor line {line_no} has a key id without a signature, or the reverse"
+                    ))
+                }
+            }
         }
         match receipts.get(count - 1) {
             None => {
@@ -166,6 +323,7 @@ fn read_optional(path: &str) -> Result<String, String> {
 fn append_entry(
     path: &str,
     anchor: Option<&str>,
+    signer: Option<&Signer>,
     make: impl FnOnce(Option<&LogEntry>) -> Result<LogEntry, String>,
 ) -> Result<LogEntry, String> {
     let mut file = fs::OpenOptions::new()
@@ -181,11 +339,24 @@ fn append_entry(
     if !verify_log(&entries).map_err(|e| e.to_string())? {
         return Err("refusing to append: existing log failed verification".into());
     }
-    if let Some(anchor_path) = anchor {
-        check_anchors(&entries, &read_optional(anchor_path)?)
-            .map_err(|e| format!("refusing to append: {e}"))?;
+    let anchor_text = match anchor {
+        Some(anchor_path) => read_optional(anchor_path)?,
+        None => String::new(),
+    };
+    if anchor.is_some() {
+        check_anchors(&entries, &anchor_text).map_err(|e| format!("refusing to append: {e}"))?;
     }
-    let entry = make(entries.last())?;
+    match signer {
+        Some(signer) => check_own_signatures(&entries, &anchor_text, signer)?,
+        None if entries.iter().any(LogEntry::is_signed) => {
+            return Err("refusing to append: this log is signed; pass --sign-key so later entries are signed too".into());
+        }
+        None => {}
+    }
+    let mut entry = make(entries.last())?;
+    if let Some(signer) = signer {
+        entry.sign(signer);
+    }
     entries.push(entry.clone());
     if !verify_log(&entries).map_err(|e| e.to_string())? {
         return Err(
@@ -196,11 +367,16 @@ fn append_entry(
     let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
     writeln!(file, "{line}").map_err(|e| e.to_string())?;
     if let Some(anchor_path) = anchor {
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "version": ANCHOR_VERSION,
             "count": entries.len(),
             "head_receipt_id": entry.receipt_id(),
         });
+        if let Some(signer) = signer {
+            record["key_id"] = serde_json::json!(signer.key_id());
+            record["signature"] =
+                serde_json::json!(signer.sign_anchor(entries.len() as u64, entry.receipt_id()));
+        }
         let mut out = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -211,13 +387,14 @@ fn append_entry(
     Ok(entry)
 }
 
+#[cfg(test)]
 fn append_chained(
     path: &str,
     anchor: Option<&str>,
     decision: &Decision,
     issued_at: String,
 ) -> Result<LogEntry, String> {
-    append_entry(path, anchor, |previous| {
+    append_entry(path, anchor, None, |previous| {
         issue_receipt(decision, previous, issued_at)
             .map(LogEntry::Decision)
             .map_err(|e| e.to_string())
@@ -232,8 +409,10 @@ fn run(command: Command) -> Result<(), String> {
             issued_at,
             log,
             anchor,
+            sign_key,
         } => {
             let issued_at = issued_at_or_now(issued_at)?;
+            let signer = sign_key.as_deref().map(load_signer).transpose()?;
             let p: Result<Proposal, _> = read(&proposal);
             let pol: Result<Policy, _> = read(&policy);
             p.and_then(|p| pol.map(|pol| (p, pol)))
@@ -241,10 +420,22 @@ fn run(command: Command) -> Result<(), String> {
                     let d = evaluate(p, pol, ApprovalSet::from_ids(approvals))
                         .map_err(|e| e.to_string())?;
                     let r = match &log {
-                        Some(path) => append_chained(path, anchor.as_deref(), &d, issued_at)?,
-                        None => issue_receipt(&d, None, issued_at)
-                            .map(LogEntry::Decision)
-                            .map_err(|e| e.to_string())?,
+                        Some(path) => {
+                            append_entry(path, anchor.as_deref(), signer.as_ref(), |previous| {
+                                issue_receipt(&d, previous, issued_at)
+                                    .map(LogEntry::Decision)
+                                    .map_err(|e| e.to_string())
+                            })?
+                        }
+                        None => {
+                            let mut entry = issue_receipt(&d, None, issued_at)
+                                .map(LogEntry::Decision)
+                                .map_err(|e| e.to_string())?;
+                            if let Some(signer) = &signer {
+                                entry.sign(signer);
+                            }
+                            entry
+                        }
                     };
                     println!(
                         "{}",
@@ -264,9 +455,11 @@ fn run(command: Command) -> Result<(), String> {
             request_sha256,
             response_sha256,
             issued_at,
+            sign_key,
         } => {
             let issued_at = issued_at_or_now(issued_at)?;
-            let entry = append_entry(&log, anchor.as_deref(), |previous| {
+            let signer = sign_key.as_deref().map(load_signer).transpose()?;
+            let entry = append_entry(&log, anchor.as_deref(), signer.as_ref(), |previous| {
                 issue_outcome(
                     &decision_receipt,
                     &status,
@@ -282,6 +475,28 @@ fn run(command: Command) -> Result<(), String> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({ "outcome": entry }))
                     .expect("JSON")
+            );
+            Ok(())
+        }
+        Command::Keygen { out, public_out } => {
+            let mut seed = [0u8; 32];
+            getrandom::getrandom(&mut seed).map_err(|e| format!("no secure randomness: {e}"))?;
+            let signer = Signer::from_seed(seed);
+            // Public file first: if the private file cannot be created, remove what we made.
+            create_new(&public_out, &signer.public_key_text(), false)?;
+            if let Err(e) = create_new(&out, &signer.private_key_text(), true) {
+                let _ = fs::remove_file(&public_out);
+                return Err(e);
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "key_id": signer.key_id(),
+                    "public_key": signer.public_key_text(),
+                    "private_key_file": out,
+                    "public_key_file": public_out,
+                }))
+                .expect("JSON")
             );
             Ok(())
         }
@@ -321,26 +536,50 @@ fn run(command: Command) -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&decision).expect("JSON"));
             Ok(())
         }
-        Command::VerifyLog { log, anchor } => {
+        Command::VerifyLog {
+            log,
+            anchor,
+            trusted_keys,
+            require_signatures,
+        } => {
             let lines = fs::read_to_string(log).map_err(|e| e.to_string())?;
             let receipts = read_entries(&lines)?;
+            let keys = trusted_keys.as_deref().map(load_trusted_keys).transpose()?;
             if let Some(anchor_path) = anchor {
                 let text = fs::read_to_string(anchor_path).map_err(|e| e.to_string())?;
-                check_anchors(&receipts, &text)?;
+                check_anchors_with(&receipts, &text, keys.as_ref(), require_signatures)?;
             }
-            if verify_log(&receipts).map_err(|e| e.to_string())? {
-                let summary = summarize(&receipts);
-                println!(
-                    "log verified: {} receipts ({} decisions, {} outcomes, {} allowed without an outcome)",
-                    receipts.len(),
-                    summary.decisions,
-                    summary.outcomes,
-                    summary.allows_without_outcome
-                );
-                Ok(())
-            } else {
-                Err("possible rollback or receipt tampering".into())
+            if !verify_log(&receipts).map_err(|e| e.to_string())? {
+                return Err("possible rollback or receipt tampering".into());
             }
+            let signatures = match &keys {
+                Some(keys) => {
+                    let report = verify_signatures(&receipts, keys, require_signatures)
+                        .map_err(|e| format!("signature check failed: {e}"))?;
+                    if report.signed == 0 {
+                        format!(
+                            "; signatures: none of the {} entries are signed, so authenticity is NOT checked",
+                            report.unsigned
+                        )
+                    } else {
+                        format!(
+                            "; signatures: {} verified, {} unsigned",
+                            report.signed, report.unsigned
+                        )
+                    }
+                }
+                None => String::new(),
+            };
+            let summary = summarize(&receipts);
+            println!(
+                "log verified: {} receipts ({} decisions, {} outcomes, {} allowed without an outcome){}",
+                receipts.len(),
+                summary.decisions,
+                summary.outcomes,
+                summary.allows_without_outcome,
+                signatures
+            );
+            Ok(())
         }
         Command::Demo { log } => {
             let sequence = [
@@ -540,7 +779,7 @@ mod tests {
         anchor: Option<&str>,
         decision_receipt: &str,
     ) -> Result<LogEntry, String> {
-        append_entry(log, anchor, |previous| {
+        append_entry(log, anchor, None, |previous| {
             issue_outcome(
                 decision_receipt,
                 "completed",
@@ -617,5 +856,198 @@ mod tests {
         fs::write(&log, text).unwrap();
         assert!(append_chained(&log, None, &decision("b"), "t".into()).is_err());
         let _ = fs::remove_file(log);
+    }
+
+    // ---- signatures -------------------------------------------------------------------------
+
+    fn signer(n: u8) -> Signer {
+        Signer::from_seed([n; 32])
+    }
+    fn signed_append(
+        log: &str,
+        anchor: Option<&str>,
+        signer: &Signer,
+        id: &str,
+    ) -> Result<LogEntry, String> {
+        let d = decision(id);
+        append_entry(log, anchor, Some(signer), |previous| {
+            issue_receipt(&d, previous, "t".into())
+                .map(LogEntry::Decision)
+                .map_err(|e| e.to_string())
+        })
+    }
+    fn trusting(signers: &[&Signer]) -> TrustedKeys {
+        TrustedKeys::from_text(
+            &signers
+                .iter()
+                .map(|s| s.public_key_text() + "\n")
+                .collect::<String>(),
+        )
+        .unwrap()
+    }
+    fn entries_of(log: &str) -> Vec<LogEntry> {
+        read_entries(&fs::read_to_string(log).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn signed_entries_and_anchor_records_verify_with_the_trusted_key() {
+        let (log, anchor) = (temp_log("sig"), temp_log("sig-anchor"));
+        let key = signer(1);
+        for id in ["a", "b", "c"] {
+            signed_append(&log, Some(&anchor), &key, id).unwrap();
+        }
+        let entries = entries_of(&log);
+        assert!(entries.iter().all(LogEntry::is_signed) && verify_log(&entries).unwrap());
+        let anchors = fs::read_to_string(&anchor).unwrap();
+        let trusted = trusting(&[&key]);
+        assert!(check_anchors_with(&entries, &anchors, Some(&trusted), true).is_ok());
+        assert!(verify_signatures(&entries, &trusted, true).is_ok());
+        for f in [log, anchor] {
+            let _ = fs::remove_file(f);
+        }
+    }
+
+    #[test]
+    fn an_edited_anchor_record_is_caught_by_its_signature_not_just_by_the_log() {
+        let (log, anchor) = (temp_log("sig-edit"), temp_log("sig-edit-anchor"));
+        let key = signer(1);
+        for id in ["a", "b", "c"] {
+            signed_append(&log, Some(&anchor), &key, id).unwrap();
+        }
+        let entries = entries_of(&log);
+        // Delete the newest log entry AND the newest anchor record: the unsigned check is satisfied
+        // by the older, matching anchors, so the rollback is invisible (the documented limit)...
+        let mut kept = fs::read_to_string(&anchor)
+            .unwrap()
+            .lines()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+        kept.push('\n');
+        assert!(check_anchors_with(&entries[..2], &kept, Some(&trusting(&[&key])), true).is_ok());
+        // ...but rewriting an anchor record to say something else needs the key.
+        let forged = fs::read_to_string(&anchor)
+            .unwrap()
+            .replacen("\"count\":1", "\"count\":2", 1);
+        let err =
+            check_anchors_with(&entries, &forged, Some(&trusting(&[&key])), true).unwrap_err();
+        assert!(err.contains("does not verify"), "{err}");
+        for f in [log, anchor] {
+            let _ = fs::remove_file(f);
+        }
+    }
+
+    #[test]
+    fn unsigned_or_stripped_anchor_records_are_refused_when_signatures_are_checked() {
+        let (log, anchor) = (temp_log("sig-strip"), temp_log("sig-strip-anchor"));
+        let key = signer(1);
+        for id in ["a", "b"] {
+            signed_append(&log, Some(&anchor), &key, id).unwrap();
+        }
+        let entries = entries_of(&log);
+        let lines: Vec<String> = fs::read_to_string(&anchor)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        let strip = |line: &str| {
+            let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+            v.as_object_mut().unwrap().remove("key_id");
+            v.as_object_mut().unwrap().remove("signature");
+            v.to_string()
+        };
+        let trusted = trusting(&[&key]);
+        let newest_stripped = format!("{}\n{}\n", lines[0], strip(&lines[1]));
+        let err =
+            check_anchors_with(&entries, &newest_stripped, Some(&trusted), false).unwrap_err();
+        assert!(err.contains("unsigned after signed"), "{err}");
+        let all_stripped = format!("{}\n{}\n", strip(&lines[0]), strip(&lines[1]));
+        assert!(check_anchors_with(&entries, &all_stripped, Some(&trusted), false).is_ok());
+        let err = check_anchors_with(&entries, &all_stripped, Some(&trusted), true).unwrap_err();
+        assert!(err.contains("not signed"), "{err}");
+        // without keys the signatures are simply not looked at
+        assert!(check_anchors(&entries, &all_stripped).is_ok());
+        for f in [log, anchor] {
+            let _ = fs::remove_file(f);
+        }
+    }
+
+    #[test]
+    fn a_signed_log_cannot_be_extended_without_signing() {
+        let log = temp_log("sig-must");
+        signed_append(&log, None, &signer(1), "a").unwrap();
+        let err = append_chained(&log, None, &decision("b"), "t".into()).unwrap_err();
+        assert!(err.contains("log is signed"), "{err}");
+        assert_eq!(entries_of(&log).len(), 1);
+        let _ = fs::remove_file(log);
+    }
+
+    #[test]
+    fn a_damaged_signature_by_our_own_key_stops_the_log_from_growing() {
+        let log = temp_log("sig-own");
+        let key = signer(1);
+        signed_append(&log, None, &key, "a").unwrap();
+        let text = fs::read_to_string(&log).unwrap();
+        let sig = text.split("\"signature\":\"ed25519:").nth(1).unwrap();
+        let first = &sig[..1];
+        let flipped = if first == "0" { "1" } else { "0" };
+        fs::write(
+            &log,
+            text.replacen(
+                &format!("ed25519:{first}"),
+                &format!("ed25519:{flipped}"),
+                1,
+            ),
+        )
+        .unwrap();
+        let err = signed_append(&log, None, &key, "b").unwrap_err();
+        assert!(err.contains("does not verify"), "{err}");
+        let _ = fs::remove_file(log);
+    }
+
+    #[test]
+    fn a_log_can_move_to_a_new_key_and_still_verify_with_both_trusted() {
+        let log = temp_log("sig-rotate");
+        let (old, new) = (signer(1), signer(2));
+        signed_append(&log, None, &old, "a").unwrap();
+        signed_append(&log, None, &new, "b").unwrap();
+        let entries = entries_of(&log);
+        assert!(verify_log(&entries).unwrap());
+        assert!(verify_signatures(&entries, &trusting(&[&old, &new]), true).is_ok());
+        let err = verify_signatures(&entries, &trusting(&[&new]), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not trusted"), "{err}");
+        let _ = fs::remove_file(log);
+    }
+
+    #[test]
+    fn a_private_key_file_that_others_can_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_log("keymode");
+        fs::write(&path, signer(1).private_key_text()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let err = load_signer(&path).err().unwrap();
+        assert!(err.contains("chmod 600"), "{err}");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(load_signer(&path).unwrap().key_id(), signer(1).key_id());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn new_key_files_are_private_and_never_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let (private, public) = (temp_log("kg-priv"), temp_log("kg-pub"));
+        create_new(&private, "secret", true).unwrap();
+        assert_eq!(
+            fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            create_new(&private, "other", true).is_err(),
+            "must not overwrite"
+        );
+        assert_eq!(fs::read_to_string(&private).unwrap().trim(), "secret");
+        let _ = (fs::remove_file(private), fs::remove_file(public));
     }
 }

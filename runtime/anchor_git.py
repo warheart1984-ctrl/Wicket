@@ -71,8 +71,16 @@ def published_anchor(repo: str, branch: str = DEFAULT_BRANCH, name: str = DEFAUL
         return _fetch_published(repo, branch, name, Path(tmp) / "repo")
 
 
-def verify_log_against(log: Path, anchor: Path) -> tuple[bool, str]:
-    """Run the kernel's verify-log with `anchor`. Returns (ok, message)."""
+def verify_log_against(
+    log: Path,
+    anchor: Path,
+    trusted_keys: Path | None = None,
+    require_signatures: bool = False,
+) -> tuple[bool, str]:
+    """Run the kernel's verify-log with `anchor`. Returns (ok, message).
+
+    With `trusted_keys` the signatures on the log and the anchor are checked too; the keys must come
+    from somewhere the log's writer cannot change."""
     try:
         binary = find_binary()
     except KernelError as exc:
@@ -80,18 +88,23 @@ def verify_log_against(log: Path, anchor: Path) -> tuple[bool, str]:
     cmd = [binary, "verify-log", "--log", str(log)]
     if anchor:
         cmd += ["--anchor", str(anchor)]
+    if trusted_keys:
+        cmd += ["--trusted-keys", str(trusted_keys)]
+        if require_signatures:
+            cmd += ["--require-signatures"]
     done = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     return done.returncode == 0, (done.stdout + done.stderr).strip()
 
 
 def publish(anchor: Path, repo: str, *, branch: str = DEFAULT_BRANCH, name: str = DEFAULT_NAME,
-            log: Path | None = None) -> str:
+            log: Path | None = None, trusted_keys: Path | None = None,
+            require_signatures: bool = False) -> str:
     """Push `anchor` to `repo`. Returns a one-line result. Raises AnchorGitError on refusal."""
     local = _lines(anchor.read_text()) if anchor.exists() else []
     if not local:
         raise AnchorGitError(f"{anchor} has no anchor records to publish")
     if log is not None:
-        ok, message = verify_log_against(log, anchor)
+        ok, message = verify_log_against(log, anchor, trusted_keys, require_signatures)
         if not ok:
             raise AnchorGitError(f"refusing to publish: the log does not match its own anchor ({message})")
     with tempfile.TemporaryDirectory() as tmp:
@@ -117,14 +130,15 @@ def publish(anchor: Path, repo: str, *, branch: str = DEFAULT_BRANCH, name: str 
         return f"published {len(local) - len(published)} new record(s); {len(local)} total on {branch}"
 
 
-def verify(log: Path, repo: str, *, branch: str = DEFAULT_BRANCH, name: str = DEFAULT_NAME) -> str:
+def verify(log: Path, repo: str, *, branch: str = DEFAULT_BRANCH, name: str = DEFAULT_NAME,
+           trusted_keys: Path | None = None, require_signatures: bool = False) -> str:
     """Check `log` against the PUBLISHED anchor only. Raises AnchorGitError if it fails."""
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp) / "repo"
         published = _fetch_published(repo, branch, name, work)
         if not published:
             raise AnchorGitError(f"nothing published on {branch} yet, so there is nothing to check against")
-        ok, message = verify_log_against(log, work / name)
+        ok, message = verify_log_against(log, work / name, trusted_keys, require_signatures)
         if not ok:
             raise AnchorGitError(message)
         return f"{message} (checked against {len(published)} published anchor records)"
@@ -140,17 +154,25 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--name", default=DEFAULT_NAME, help="file name inside the repository")
         p.add_argument("--log", type=Path, required=(cmd == "verify"),
                        help="receipt log" + (" (publish: check it against its anchor first)" if cmd == "publish" else ""))
+        p.add_argument("--trusted-keys", type=Path,
+                       help="public keys to check signatures against (keep them out of the log writer's reach)")
+        p.add_argument("--require-signatures", action="store_true",
+                       help="every entry and anchor record must be signed (needs --trusted-keys)")
         if cmd == "publish":
             p.add_argument("--anchor", type=Path, required=True)
     args = parser.parse_args(argv)
     if shutil.which("git") is None:
         print("git is not installed", file=sys.stderr)
         return 2
+    if args.require_signatures and not args.trusted_keys:
+        parser.error("--require-signatures needs --trusted-keys")
     try:
         if args.command == "publish":
-            print(publish(args.anchor, args.repo, branch=args.branch, name=args.name, log=args.log))
+            print(publish(args.anchor, args.repo, branch=args.branch, name=args.name, log=args.log,
+                          trusted_keys=args.trusted_keys, require_signatures=args.require_signatures))
         else:
-            print(verify(args.log, args.repo, branch=args.branch, name=args.name))
+            print(verify(args.log, args.repo, branch=args.branch, name=args.name,
+                         trusted_keys=args.trusted_keys, require_signatures=args.require_signatures))
     except AnchorGitError as exc:
         print(f"anchor_git: {exc}", file=sys.stderr)
         return 1

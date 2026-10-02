@@ -69,6 +69,7 @@ def test_the_screen_works_in_a_real_browser_and_hostile_text_stays_inert(tmp_pat
     assert r["injected_elements"] == 0 and r["xss_ran"] is False
     assert r["hash_after_signin"] == ""  # the token was removed from the address bar
     assert any("Receipt log verified" in chip for chip in r["chips"]), r["chips"]
+    assert any("signatures: not checked" in chip for chip in r["chips"]), r["chips"]  # no keys configured here
     assert r["phone_horizontal_overflow"] is False
     assert len(r["dialogs"]) == 1 and "Approve this request?" in r["dialogs"][0]
     assert r["pending_hidden_after"] is True and r["approved_rows"] == 1

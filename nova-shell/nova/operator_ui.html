@@ -176,6 +176,9 @@ function render(state) {
       chips.append(chip(log.allows_without_outcome + " allowed without an outcome", "warn"));
     }
     chips.append(chip(log.anchored ? "anchor on" : "no anchor", log.anchored ? "ok" : "warn"));
+    if (!log.signatures.checked) chips.append(chip("signatures: not checked", "warn"));
+    else if (log.verified && log.signatures.authenticated) chips.append(chip("signatures verified", "ok"));
+    else if (log.verified) chips.append(chip("NOT AUTHENTICATED: no signatures", "bad"));
     if (!log.verified) chips.append(chip(log.message, "bad"));
   }
 
