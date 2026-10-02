@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -90,6 +92,56 @@ def serve_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _approval_store():
+    from nova.ick import approval_store_from_env
+
+    store = approval_store_from_env()
+    if store is None:
+        print("NOVA_ICK_APPROVALS is not set; there is nowhere to record approvals.", file=sys.stderr)
+    return store
+
+
+def approvals_command(args: argparse.Namespace) -> int:
+    store = _approval_store()
+    if store is None:
+        return 2
+    now = time.time()
+    approved = {row.get("proposal_hash") for row in store.approvals() if float(row.get("expires_at", 0)) > now}
+    waiting = [row for row in store.pending() if row.get("proposal_hash") not in approved]
+    if args.json:
+        print(json.dumps({"pending": waiting, "approved": store.approvals()}, indent=2, sort_keys=True))
+        return 0
+    if not waiting:
+        print("nothing is waiting for approval")
+    for row in waiting:
+        print(f"{row['proposal_hash']}  {row.get('action')} -> {row.get('target')} "
+              f"[{row.get('effect')}/{row.get('risk')}]")
+    return 0
+
+
+def approve_command(args: argparse.Namespace) -> int:
+    store = _approval_store()
+    if store is None:
+        return 2
+    match = [row for row in store.pending() if row.get("proposal_hash") == args.proposal_hash]
+    if not match:
+        print(f"no pending request with hash {args.proposal_hash}", file=sys.stderr)
+        return 1
+    row = match[0]
+    print(f"approve: {row.get('action')} -> {row.get('target')} [{row.get('effect')}/{row.get('risk')}] "
+          f"for {args.expires_in:g}s, {args.uses} use(s)")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("refusing to approve without --yes when not run from a terminal", file=sys.stderr)
+            return 1
+        if input("type 'yes' to approve: ").strip().lower() != "yes":
+            print("not approved")
+            return 1
+    entry = store.approve(args.proposal_hash, approved_by=args.by, expires_in=args.expires_in, uses=args.uses)
+    print(f"approved: {entry['approval_id']} (expires {int(entry['expires_at'])})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nova", description="Lawful Nova local CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -114,6 +166,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = sub.add_parser("serve", help="Start the local Lawful Nova /health API")
     serve.set_defaults(func=serve_command)
+    approvals = sub.add_parser("approvals", help="List requests waiting for a human approval")
+    approvals.add_argument("--json", action="store_true")
+    approvals.set_defaults(func=approvals_command)
+
+    approve = sub.add_parser("approve", help="Approve one pending request by its proposal hash")
+    approve.add_argument("proposal_hash")
+    approve.add_argument("--by", default=os.environ.get("USER", "operator"), help="who is approving")
+    approve.add_argument("--expires-in", type=float, default=3600, help="seconds (default 3600)")
+    approve.add_argument("--uses", type=int, default=1, help="how many times it may be used (default 1)")
+    approve.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    approve.set_defaults(func=approve_command)
     return parser
 
 

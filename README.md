@@ -77,7 +77,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 77 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 97 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -124,19 +124,56 @@ python -m nova.api
     that is refused shows `status: "refused"` in the results and nothing is sent.
 - Any refusal on any route becomes HTTP 403 through one app-wide handler, never a 500.
 - Gossip is a `write`, and the demo policy requires approval for writes, so with
-  `demo/policy.json` gossip waits and is refused. To allow it, use a policy with
-  `effects_requiring_approval: []`. Nova has no way to pass kernel approvals yet.
+  `demo/policy.json` gossip waits until a human approves it (see below), or until you use
+  a policy with `effects_requiring_approval: []`.
 - Not gated, on purpose: `/v1/chat` with no provider set. It uses the built-in stub,
   which contacts nothing (a test proves that, with the network blocked).
 - Not checked: nothing in `nova/` runs shell commands or opens raw sockets, but a model
   called from outside Nova is not gated. The local-model tool was checked with fakes, not
   against a real Ollama or vLLM server.
+### Human approvals
+
+When the kernel says `await_human_approval`, a person can clear that one request. Set
+`NOVA_ICK_APPROVALS` (the approvals file) and optionally `NOVA_ICK_STATE` (a folder Nova
+writes to; default `.runtime/ick-state`):
+
+```bash
+python -m nova.cli approvals                      # what is waiting
+python -m nova.cli approve <proposal_hash> --by alice --expires-in 600 --uses 1
+```
+
+1. A refused request comes back as HTTP 403 `KERNEL_AWAITING_APPROVAL`, with its
+   `proposal_hash` and an `approve_with` hint. Nova also lists it as pending.
+2. `approve` shows what is being approved and asks for confirmation (`--yes` skips the
+   prompt, and is required when not run from a terminal). It records one approval bound
+   to that hash, with an expiry (default 3600 s) and a use limit (default 1).
+3. When the same request comes in again, Nova finds the approval, passes it to the kernel,
+   and records the use. Whatever the kernel answers is final: Nova never overrides it.
+   Both the wait and the approved call are in the receipt log.
+
+Identical requests give identical hashes (the proposal is built from the request's
+content, hashed, never its text). An approval for one prompt does not cover another, and
+an approval for one gossip peer does not cover another peer.
+
+**Where the trust boundary is.** The kernel only checks that an approval id is in the list
+it is given, so it cannot tell a human from Nova. These rules come from Nova, not the kernel:
+- There is **no HTTP route for approving**, on purpose, and a test checks it. Anything that
+  could call one would be approving its own requests.
+- Nova only **reads** the approvals file. Keep it where the Nova server cannot write
+  (another account, a read-only mount, file permissions). If Nova can write it, nothing
+  stops it approving itself.
+- This protects against requests arriving over the API or from model-driven tools. It does
+  not protect against someone who can edit Nova's code or the approvals file.
+- On Windows, simultaneous use of the last approval is not locked (POSIX file locks only),
+  so two concurrent calls could both use it.
+- A gossip round to the same peer has the same hash each time, so one approval covers
+  one round unless you raise `--uses`.
+
 - Nova keeps its own receipts too. The two systems now sit side by side, with the
   kernel's receipt id included in Nova's reply. They are not merged into one log.
 
 ## Planned
 
-1. Let Nova pass kernel approvals, so an `await_human_approval` verdict can be cleared.
-2. Make `/v1/chat` work with the external provider (it only supports Ollama today).
-3. A helper that copies the latest anchor to an external place (a separate git repo).
-4. A minimal operator surface.
+1. Make `/v1/chat` work with the external provider (it only supports Ollama today).
+2. A helper that copies the latest anchor to an external place (a separate git repo).
+3. A minimal operator surface.
