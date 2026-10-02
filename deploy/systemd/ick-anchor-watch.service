@@ -1,0 +1,63 @@
+# Publishes the receipt log's anchor to a separate git repository on a schedule (every 5 minutes by
+# default), and records each outcome in a status file the operator screen reads.
+# Install as /etc/systemd/system/ick-anchor-watch.service. It runs as its OWN account, with push
+# credentials Nova and the signer do not have: that separation is the point. See deploy/README.md.
+[Unit]
+Description=Infinity anchor publisher
+Documentation=file:///opt/infinity-core/deploy/README.md
+After=network-online.target ick-signer.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ick-publisher
+Group=ick-publisher
+# Read access to the log and the anchor (written by ick-signer), nothing more.
+SupplementaryGroups=ick-audit
+WorkingDirectory=/opt/infinity-core
+# ANCHOR_REPO (the git URL) and the optional ANCHOR_INTERVAL come from this file.
+EnvironmentFile=/etc/ick-publisher/ick-anchor-watch.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=HOME=/var/lib/ick-publisher
+# Pin the host key and use only the deploy key, so a changed server is an error, not a prompt.
+Environment="GIT_SSH_COMMAND=ssh -i /etc/ick-publisher/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ick-publisher/known_hosts"
+ExecStart=/usr/bin/python3 -m runtime.anchor_git watch \
+    --repo ${ANCHOR_REPO} \
+    --anchor /var/lib/ick/anchor/anchor.jsonl \
+    --log /var/lib/ick/log/receipts.jsonl \
+    --trusted-keys /etc/ick/trusted-keys.pub --require-signatures \
+    --status-file /var/lib/ick-publisher/status.json \
+    --interval ${ANCHOR_INTERVAL}
+Restart=always
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=30
+UMask=0027
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ick-publisher
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

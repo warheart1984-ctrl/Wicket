@@ -97,7 +97,10 @@ The verifier prints this with every run, because the word is easy to over-read:
   CI runs the suites there; it skips the tests of Unix-only behaviour.
 - No hardware keys or key store, no key revocation, no multi-party signing.
 - The kernel starts a process per decision. Throughput has not been measured.
-- Nothing starts the signer service or the anchor publisher for you; you must run and supervise them.
+- `deploy/` has systemd units, accounts and an audit script for the signer, Nova and the publisher. They
+  pass `systemd-analyze` and their commands run in tests, but they have not been run under a booted
+  systemd with real accounts, and the audit reads ordinary permissions only (no ACLs, capabilities or
+  security modules). Nothing monitors that the services keep running.
 
 ## Questions to ask before relying on it
 

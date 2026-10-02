@@ -1,0 +1,8 @@
+# The same job as ick-anchor-watch.service, for machines without systemd. Install as
+# /etc/cron.d/ick-anchor-publish (mode 0644, owner root). It runs as ick-publisher every 5 minutes.
+# The operator screen calls the anchor stale after 15 minutes without a successful publish.
+#
+# Fill in the repository URL. The `GIT_SSH_COMMAND` pins the deploy key and the host key.
+GIT_SSH_COMMAND="ssh -i /etc/ick-publisher/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ick-publisher/known_hosts"
+HOME=/var/lib/ick-publisher
+*/5 * * * * ick-publisher cd /opt/infinity-core && /usr/bin/python3 -m runtime.anchor_git publish --repo git@github.com:YOUR-ORG/YOUR-ANCHOR-REPO.git --anchor /var/lib/ick/anchor/anchor.jsonl --log /var/lib/ick/log/receipts.jsonl --trusted-keys /etc/ick/trusted-keys.pub --require-signatures --status-file /var/lib/ick-publisher/status.json >/dev/null 2>&1
