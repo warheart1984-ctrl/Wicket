@@ -58,18 +58,25 @@ class Kernel:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "proposal.json"
             path.write_text(json.dumps(proposal))
-            done = subprocess.run(
-                [self.binary, "evaluate", "--proposal", str(path), "--policy", str(self.policy)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            cmd = [self.binary, "evaluate", "--proposal", str(path), "--policy", str(self.policy)]
+            if self.receipt_log:
+                self.receipt_log.parent.mkdir(parents=True, exist_ok=True)
+                cmd += ["--log", str(self.receipt_log)]  # the CLI chains and appends the receipt
+            done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if done.returncode != 0:
             raise KernelError(done.stderr.strip() or f"infinityctl exited {done.returncode}")
         out = json.loads(done.stdout)
         decision, receipt = out["decision"], out["receipt"]
-        if self.receipt_log:
-            self.receipt_log.parent.mkdir(parents=True, exist_ok=True)
-            with self.receipt_log.open("a") as log:
-                log.write(json.dumps(receipt, sort_keys=True) + "\n")
         return Decision(decision["verdict"], list(decision.get("reason_codes") or []), receipt)
+
+    def verify(self) -> bool:
+        """True if the receipt log is an unbroken, untampered chain."""
+        if not self.receipt_log or not self.receipt_log.exists():
+            raise KernelError("no receipt log to verify")
+        done = subprocess.run(
+            [self.binary, "verify-log", "--log", str(self.receipt_log)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return done.returncode == 0

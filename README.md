@@ -35,7 +35,19 @@ Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_K
 All three were checked live. Reasoning models get a 256-token minimum and a
 no-thinking or low-reasoning setting so short replies are not left empty.
 
+## Receipt chaining
+
+`infinityctl evaluate --log FILE` locks the log, checks that the existing chain is
+intact, then appends a receipt linked to the previous one. `infinityctl verify-log
+--log FILE` (or `Kernel.verify()` in Python) checks the whole chain. If the log has
+been edited, the runtime refuses to take another turn and calls no provider.
+
+What the chain catches: an edited receipt, or one removed from the start or middle.
+What it does **not** catch: receipts deleted from the **end** of the log. Nothing
+records how long the log should be. Closing that needs an external anchor, such as
+publishing the latest receipt id somewhere the log's owner cannot rewrite.
+
 ## Planned
 
-1. Receipt chaining across turns (the CLI currently issues each receipt unlinked).
+1. An external anchor for the latest receipt id, to detect tail deletion.
 2. A minimal operator surface.

@@ -75,3 +75,28 @@ def test_missing_key_and_empty_reply_raise(monkeypatch):
         complete("groq", [], client=FakeClient())
     with pytest.raises(ProviderError, match="no text"):
         complete("nvidia", [], client=FakeClient(text=""))
+
+
+def test_receipts_are_chained_and_verifiable(tmp_path):
+    log, client = tmp_path / "r.jsonl", FakeClient()
+    kernel = Kernel(receipt_log=log)
+    for text in ("one", "two", "three"):
+        run_turn(text, "groq", kernel, client=client)
+    receipts = [json.loads(line) for line in log.read_text().splitlines()]
+    assert receipts[0]["previous_receipt_hash"] is None
+    assert receipts[1]["previous_receipt_hash"] == receipts[0]["receipt_id"]
+    assert receipts[2]["previous_receipt_hash"] == receipts[1]["receipt_id"]
+    assert kernel.verify() is True
+
+
+def test_tampering_is_detected_and_blocks_further_turns(tmp_path):
+    log, client = tmp_path / "r.jsonl", FakeClient()
+    kernel = Kernel(receipt_log=log)
+    for text in ("one", "two"):
+        run_turn(text, "groq", kernel, client=client)
+    lines = log.read_text().splitlines()
+    log.write_text(lines[0].replace('"allow"', '"deny"') + "\n" + lines[1] + "\n")
+    assert kernel.verify() is False
+    with pytest.raises(KernelError, match="failed verification"):
+        run_turn("three", "groq", kernel, client=client)
+    assert len(client.calls) == 2  # the blocked turn never reached the provider
