@@ -1,7 +1,6 @@
 """Nova's gate with the kernel, key, policy and log in a separate signer service."""
 
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -19,9 +18,6 @@ try:
     BINARY = _find_binary(None)
 except KernelRefusal:
     pytest.skip("infinityctl not built (run `cargo build`)", allow_module_level=True)
-
-if os.name != "posix":
-    pytest.skip("the signer service speaks over Unix domain sockets", allow_module_level=True)
 
 from runtime.ick_service import Service, make_server  # noqa: E402
 from runtime.kernel import Kernel  # noqa: E402
