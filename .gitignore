@@ -1,0 +1,4 @@
+/target/
+/adapters/strands-ts/.build/
+/adapters/strands-ts/node_modules/
+/scripts/__pycache__/

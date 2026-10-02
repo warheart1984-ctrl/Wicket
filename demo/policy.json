@@ -1,0 +1,1 @@
+{"version":"infinity.policy.v1","policy_id":"policy-demo-v1","denied_effects":[],"effects_requiring_approval":["write"],"risks_requiring_approval":["critical"]}

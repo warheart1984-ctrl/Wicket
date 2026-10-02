@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Infinity Receipt v1","type":"object","required":["version","receipt_id","proposal_hash","policy_hash","decision_hash","verdict","reason_codes","issued_at"]}

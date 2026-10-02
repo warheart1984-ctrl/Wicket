@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/infinity-kernel", "crates/infinity-cli"]
+resolver = "2"
