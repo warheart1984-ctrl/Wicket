@@ -66,7 +66,38 @@ runtime cannot do this for you, so `--anchor` is opt-in and has no default locat
 An attacker who can edit both files can still erase history; the anchor raises the
 bar, it is not a proof.
 
+## Nova shell
+
+`nova-shell/` is the Python core of the lawful Nova shell, brought over from
+`Project-Infinity1/lawful-nova-shell`: a CLI (`python -m nova.cli`) and an
+OpenAI-style HTTP API (`python -m nova.api`, port 8080) that attaches a governance
+receipt to every reply. Left out: the Electron desktop app, OS installers, quickstart
+and packaging scripts.
+
+```bash
+cd nova-shell
+pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
+python -m pytest          # 55 pass, 4 skipped (the skips test parts that were left out)
+python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
+```
+
+To use a real model, point its external provider at any OpenAI-compatible host:
+
+```bash
+NOVA_PROVIDER=external NOVA_EXTERNAL_URL=https://integrate.api.nvidia.com/v1 \
+NOVA_EXTERNAL_API_KEY=... NOVA_EXTERNAL_MODEL=nvidia/nemotron-3-super-120b-a12b \
+python -m nova.api
+```
+
+Groq (`https://api.groq.com/openai/v1`, `openai/gpt-oss-120b`) works the same way. Both
+were checked live. One change was made to the imported code: a `User-Agent` header,
+because Groq rejects Python's default one.
+
+Nova's receipts and the ICK kernel's receipts are **separate systems** for now. Nova
+does not yet ask the kernel before it calls a model.
+
 ## Planned
 
-1. A helper that copies the latest anchor to an external place (a separate git repo).
-2. A minimal operator surface.
+1. Make Nova ask the ICK kernel before it calls a model, so there is one set of receipts.
+2. A helper that copies the latest anchor to an external place (a separate git repo).
+3. A minimal operator surface.
