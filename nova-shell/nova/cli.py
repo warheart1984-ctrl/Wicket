@@ -135,7 +135,12 @@ def approve_command(args: argparse.Namespace) -> int:
         if not sys.stdin.isatty():
             print("refusing to approve without --yes when not run from a terminal", file=sys.stderr)
             return 1
-        if input("type 'yes' to approve: ").strip().lower() != "yes":
+        try:
+            answer = input("type 'yes' to approve: ")
+        except EOFError:  # stdin is not really a terminal (Windows reports NUL as one)
+            print("refusing to approve without --yes when not run from a terminal", file=sys.stderr)
+            return 1
+        if answer.strip().lower() != "yes":
             print("not approved")
             return 1
     try:
@@ -163,7 +168,12 @@ def deny_command(args: argparse.Namespace) -> int:
         if not sys.stdin.isatty():
             print("refusing to deny without --yes when not run from a terminal", file=sys.stderr)
             return 1
-        if input("type 'yes' to deny: ").strip().lower() != "yes":
+        try:
+            answer = input("type 'yes' to deny: ")
+        except EOFError:  # stdin is not really a terminal (Windows reports NUL as one)
+            print("refusing to deny without --yes when not run from a terminal", file=sys.stderr)
+            return 1
+        if answer.strip().lower() != "yes":
             print("not denied")
             return 1
     try:

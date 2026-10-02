@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -95,6 +96,7 @@ def test_a_failed_call_is_recorded_as_failed_and_the_real_error_survives(paths):
     assert outcome["decision_receipt_id"] == decision["receipt_id"] and verify(paths)[0]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the stand-in binary is a #! script, which Windows cannot run")
 def test_if_the_outcome_cannot_be_written_the_reply_is_withheld(paths):
     fake = paths["dir"] / "infinityctl"
     fake.write_text(f"#!{sys.executable}\nimport os, sys\n"

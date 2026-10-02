@@ -23,8 +23,8 @@ cargo test
 GitHub Actions (`.github/workflows/ci.yml`) runs these, the build and both Python suites on Linux and
 Windows for every push and pull request, plus the browser test for the operator screen on Linux. The
 Python suites skip kernel tests quietly when `infinityctl` has not been built, so the workflow checks that
-both packages can find it. The Windows job is new and unproven until it has run; some Unix-only code (file
-locking, key-file modes) is expected to behave differently there.
+both packages can find it. Some tests are skipped on Windows because what they check does not exist there
+(Unix key-file modes, signals sent to a child, `#!` stand-in binaries, Unix sockets for the signer service).
 
 ## Governed chat runtime
 
@@ -294,7 +294,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 209 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 210 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
