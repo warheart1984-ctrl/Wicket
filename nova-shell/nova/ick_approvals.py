@@ -13,6 +13,10 @@ How it works
   for it, nothing can approve it afterwards, and Nova refuses it as `KERNEL_DENIED_BY_HUMAN`. A
   request that differs in any way has a different hash and starts again as a new pending one.
   To undo a denial, a human deletes its line from the denials file.
+  A pending request that nobody decides expires after `pending_ttl` seconds (default 7 days). An
+  expired request is no longer listed, and can no longer be approved or denied, but the file is
+  never rewritten. If the same request comes in again it is recorded as a fresh pending request.
+  Expiry does not touch approvals (they have their own expiry) or denials (they are final).
 
 Trust boundary (read this)
   * There is deliberately NO HTTP route for approving. A client, or a model with tool
@@ -78,8 +82,15 @@ def _locked(path: Path) -> Iterator[None]:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+DEFAULT_PENDING_TTL = 7 * 24 * 3600.0
+
+
 class ApprovalStore:
-    def __init__(self, approvals_file: str | Path, state_dir: str | Path) -> None:
+    def __init__(self, approvals_file: str | Path, state_dir: str | Path, *,
+                 pending_ttl: float = DEFAULT_PENDING_TTL) -> None:
+        if not pending_ttl > 0:
+            raise ValueError("pending_ttl must be positive")
+        self.pending_ttl = float(pending_ttl)
         self.approvals_file = Path(approvals_file)
         self.denials_file = Path(str(approvals_file) + ".denials")
         self.pending_file = Path(state_dir) / "pending.jsonl"
@@ -87,10 +98,12 @@ class ApprovalStore:
 
     # --- Nova's side: read approvals, write pending and used -------------------------------
 
-    def record_pending(self, *, proposal_hash: str, summary: dict[str, Any]) -> None:
-        if any(row.get("proposal_hash") == proposal_hash for row in _read_jsonl(self.pending_file)):
-            return
-        _append(self.pending_file, {"proposal_hash": proposal_hash, "requested_at": int(time.time()), **summary})
+    def record_pending(self, *, proposal_hash: str, summary: dict[str, Any],
+                       now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        if any(row.get("proposal_hash") == proposal_hash for row in self._live(now)):
+            return  # already waiting; an expired earlier request does not count
+        _append(self.pending_file, {"proposal_hash": proposal_hash, "requested_at": int(now), **summary})
 
     def is_denied(self, proposal_hash: str) -> bool:
         """True if a human denied this request. A denials file that exists but cannot be read
@@ -128,8 +141,32 @@ class ApprovalStore:
 
     # --- the human's side (CLI only) ---------------------------------------------------------
 
-    def pending(self) -> list[dict[str, Any]]:
-        return _read_jsonl(self.pending_file)
+    def _alive(self, row: dict[str, Any], now: float) -> bool:
+        """A request is live for `pending_ttl` seconds. A malformed time never counts as live."""
+        try:
+            return now - float(row["requested_at"]) <= self.pending_ttl
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _live(self, now: float) -> list[dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for row in _read_jsonl(self.pending_file):  # a later row for the same request wins
+            if isinstance(row.get("proposal_hash"), str):
+                latest[row["proposal_hash"]] = row
+        return [row for row in latest.values() if self._alive(row, now)]
+
+    def pending(self, *, now: float | None = None) -> list[dict[str, Any]]:
+        """Requests asked for and not yet expired (one row per request, newest ask)."""
+        return self._live(time.time() if now is None else now)
+
+    def expired_count(self, *, now: float | None = None) -> int:
+        """How many requests have expired without anyone deciding them."""
+        now = time.time() if now is None else now
+        approved = {row.get("proposal_hash") for row in self.approvals()}
+        live = {row["proposal_hash"] for row in self._live(now)}
+        seen = {row.get("proposal_hash") for row in _read_jsonl(self.pending_file)
+                if isinstance(row.get("proposal_hash"), str)}
+        return sum(1 for h in seen if h not in live and h not in approved and not self.is_denied(h))
 
     def approvals(self) -> list[dict[str, Any]]:
         return _read_jsonl(self.approvals_file)
@@ -137,9 +174,9 @@ class ApprovalStore:
     def denials(self) -> list[dict[str, Any]]:
         return _read_jsonl(self.denials_file)
 
-    def waiting(self) -> list[dict[str, Any]]:
+    def waiting(self, *, now: float | None = None) -> list[dict[str, Any]]:
         """Pending requests nobody has denied."""
-        return [row for row in self.pending() if not self.is_denied(str(row.get("proposal_hash")))]
+        return [row for row in self.pending(now=now) if not self.is_denied(str(row.get("proposal_hash")))]
 
     def active(self, *, now: float | None = None) -> list[dict[str, Any]]:
         """Approvals that can still be used, each with how many uses are left."""
@@ -163,8 +200,8 @@ class ApprovalStore:
         now = time.time() if now is None else now
         if uses < 1 or expires_in <= 0:
             raise ValueError("uses must be at least 1 and expires_in must be positive")
-        if not any(row.get("proposal_hash") == proposal_hash for row in self.pending()):
-            raise KeyError(f"no pending request with hash {proposal_hash}")
+        if not any(row.get("proposal_hash") == proposal_hash for row in self.pending(now=now)):
+            raise KeyError(f"no pending request with hash {proposal_hash} (it may have expired)")
         if self.is_denied(proposal_hash):
             raise ValueError("a human already denied this request")
         entry = {
@@ -181,8 +218,8 @@ class ApprovalStore:
     def deny(self, proposal_hash: str, *, denied_by: str, reason: str = "",
              now: float | None = None) -> dict[str, Any]:
         now = time.time() if now is None else now
-        if not any(row.get("proposal_hash") == proposal_hash for row in self.pending()):
-            raise KeyError(f"no pending request with hash {proposal_hash}")
+        if not any(row.get("proposal_hash") == proposal_hash for row in self.pending(now=now)):
+            raise KeyError(f"no pending request with hash {proposal_hash} (it may have expired)")
         if self.is_denied(proposal_hash):
             raise ValueError("a human already denied this request")
         entry = {

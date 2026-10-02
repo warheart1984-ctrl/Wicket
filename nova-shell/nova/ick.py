@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
 from nova.errors import ProviderError
-from nova.ick_approvals import ApprovalStore
+from nova.ick_approvals import DEFAULT_PENDING_TTL, ApprovalStore
 
 _HERE = Path(__file__).resolve()
 
@@ -300,7 +300,17 @@ def approval_store_from_env(env: Any = None) -> ApprovalStore | None:
     if not approvals:
         return None
     state = (env.get("NOVA_ICK_STATE") or "").strip() or ".runtime/ick-state"
-    return ApprovalStore(approvals, state)
+    return ApprovalStore(approvals, state, pending_ttl=pending_ttl_from(env.get("NOVA_ICK_PENDING_TTL")))
+
+
+def pending_ttl_from(value: Any) -> float:
+    """Seconds an undecided request stays pending. Anything unusable falls back to the default
+    (7 days), never to "forever"."""
+    try:
+        ttl = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_PENDING_TTL
+    return ttl if ttl > 0 and ttl == ttl and ttl != float("inf") else DEFAULT_PENDING_TTL
 
 
 class IckGatedProvider:

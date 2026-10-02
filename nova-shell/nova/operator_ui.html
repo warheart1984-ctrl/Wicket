@@ -74,6 +74,7 @@
     <section class="card">
       <h2>Waiting for approval</h2>
       <p class="muted" id="pending-empty">Nothing is waiting.</p>
+      <p class="muted" id="expired-note" hidden></p>
       <table id="pending-table" hidden>
         <thead><tr><th>Action</th><th>Target</th><th>Effect / risk</th><th>Asked</th><th>Decide</th></tr></thead>
         <tbody id="pending-body"></tbody>
@@ -236,6 +237,11 @@ function render(state) {
               cell("Uses left", row.remaining), cell("Expires", until(row.expires_at)));
     approved.append(tr);
   }
+  const expired = Number(state.expired_pending) || 0;
+  $("expired-note").hidden = expired === 0;
+  $("expired-note").textContent = expired + " earlier request" + (expired === 1 ? "" : "s") +
+    " expired after " + Math.round((Number(state.pending_ttl) || 0) / 3600) +
+    " h without a decision. If one is asked for again it will appear here as new.";
   const denied = $("denied-body");
   denied.replaceChildren();
   for (const row of state.denied || []) {
