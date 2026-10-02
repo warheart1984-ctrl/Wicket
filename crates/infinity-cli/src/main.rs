@@ -1021,6 +1021,7 @@ mod tests {
         let _ = fs::remove_file(log);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_private_key_file_that_others_can_read_is_refused() {
         use std::os::unix::fs::PermissionsExt;
@@ -1036,13 +1037,16 @@ mod tests {
 
     #[test]
     fn new_key_files_are_private_and_never_overwritten() {
-        use std::os::unix::fs::PermissionsExt;
         let (private, public) = (temp_log("kg-priv"), temp_log("kg-pub"));
         create_new(&private, "secret", true).unwrap();
-        assert_eq!(
-            fs::metadata(&private).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         assert!(
             create_new(&private, "other", true).is_err(),
             "must not overwrite"
