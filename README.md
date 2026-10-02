@@ -223,7 +223,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 176 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 187 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -290,6 +290,7 @@ writes to; default `.runtime/ick-state`):
 ```bash
 python -m nova.cli approvals                      # what is waiting
 python -m nova.cli approve <proposal_hash> --by alice --expires-in 600 --uses 1
+python -m nova.cli deny <proposal_hash> --by alice --reason "not this"
 ```
 
 1. A refused request comes back as HTTP 403 `KERNEL_AWAITING_APPROVAL`, with its
@@ -300,6 +301,13 @@ python -m nova.cli approve <proposal_hash> --by alice --expires-in 600 --uses 1
 3. When the same request comes in again, Nova finds the approval, passes it to the kernel,
    and records the use. Whatever the kernel answers is final: Nova never overrides it.
    Both the wait and the approved call are in the receipt log.
+4. `deny` is the other answer. It records a denial in `<approvals file>.denials`, which Nova reads
+   the same way it reads approvals and must not be able to write. A denial is final for that exact
+   request: it cancels any approval already given for it, nothing can approve it afterwards, and
+   Nova answers it with HTTP 403 `KERNEL_DENIED_BY_HUMAN`. A request that differs at all has a new
+   hash and starts over as pending. There is no undo command; a human removes the denial's line
+   from the file. A denials file that exists but cannot be read counts as denying everything,
+   and a lost or corrupted line would fail open, so keep the file where only the human can write.
 
 Identical requests give identical hashes (the proposal is built from the request's
 content, hashed, never its text). An approval for one prompt does not cover another, and
@@ -325,7 +333,7 @@ it is given, so it cannot tell a human from Nova. These rules come from Nova, no
 ### Operator screen
 
 A small web page for the human who runs the system. It shows what Nova is waiting on
-(with an Approve button), whether the receipt log still verifies against its anchor, the
+(with Approve and Deny buttons), whether the receipt log still verifies against its anchor, the
 most recent receipts, and whether Nova is up. It works on a phone-sized screen and in dark mode.
 
 ```bash
@@ -351,15 +359,15 @@ keep the approvals file where the Nova server cannot write it. How the screen is
   JSON and is written with `textContent`, so hostile text (a request's target, say) is shown as
   plain text and never runs. This was checked in a real Chromium.
 - The server enforces the same limits as the CLI plus its own: 1 minute to 24 hours, 1 to 100
-  uses, and a request must already be pending. It can write approval records and nothing else.
+  uses, and a request must already be pending. It can write approval and denial records and nothing else.
 
 **Limits.** The token is the only login: anyone who can read your terminal output or your
-browser can approve. There is no HTTPS (it never leaves the machine) and no "deny" button yet
-(a request you do not approve simply stays pending). The page refreshes every few seconds.
+browser can approve or deny. There is no HTTPS (it never leaves the machine). Old pending
+requests that nobody decides stay listed until someone does. The page refreshes every few seconds.
 Browser tests need Node with Playwright and Chromium and are skipped when those are missing.
 
 ## Planned
 
-1. A "deny" action on the operator screen, and a way to close or expire old pending requests.
+1. A way to expire old pending requests nobody has decided.
 2. Run the signer as a separate process under another user, so the Nova process never holds the key.
 3. Strict JSON contracts for the proposal, policy and decision formats too.

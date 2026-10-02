@@ -287,3 +287,84 @@ def test_the_gate_trusts_the_kernels_answer_not_its_own_bookkeeping(policy, stor
     with pytest.raises(KernelRefusal) as err:
         provider.chat_completion(request())
     assert err.value.code == "KERNEL_AWAITING_APPROVAL" and inner.calls == 0
+
+
+# --- denying ----------------------------------------------------------------------------------
+
+def test_deny_needs_a_pending_request_and_is_final(store):
+    with pytest.raises(KeyError):
+        store.deny("sha3-256:nope", denied_by="alice")
+    store.record_pending(proposal_hash="h1", summary={"action": "a"})
+    entry = store.deny("h1", denied_by="alice", reason="too risky")
+    assert entry["denial_id"].startswith("denial-") and store.is_denied("h1") and not store.is_denied("h2")
+    with pytest.raises(ValueError):
+        store.deny("h1", denied_by="alice")
+    with pytest.raises(ValueError):
+        store.approve("h1", approved_by="alice")  # nothing can approve it afterwards
+    assert store.waiting() == [] and store.pending() != []
+
+
+def test_a_denial_cancels_an_approval_already_given(store):
+    store.record_pending(proposal_hash="h1", summary={})
+    store.approve("h1", approved_by="alice", uses=3)
+    assert store.active() != []
+    store.deny("h1", denied_by="bob")
+    assert store.claim("h1") is None and store.active() == []
+
+
+def test_a_denial_only_covers_its_own_request(store):
+    store.record_pending(proposal_hash="h1", summary={})
+    store.record_pending(proposal_hash="h2", summary={})
+    store.deny("h1", denied_by="bob")
+    store.approve("h2", approved_by="alice")
+    assert store.claim("h1") is None and store.claim("h2") is not None
+
+
+def test_an_unreadable_denials_file_denies_everything(store, tmp_path):
+    store.record_pending(proposal_hash="h1", summary={})
+    store.approve("h1", approved_by="alice")
+    store.denials_file.mkdir(parents=True)  # exists, but cannot be read as a file
+    assert store.is_denied("h1") and store.claim("h1") is None
+
+
+def test_a_denied_request_is_refused_as_such_and_stays_refused(policy, store):
+    inner, provider = gated(policy, store)
+    h = refuse_and_get_hash(provider)
+    store.deny(h, denied_by="alice", reason="no")
+    for _ in range(2):
+        with pytest.raises(KernelRefusal) as err:
+            provider.chat_completion(request())
+        assert err.value.code == "KERNEL_DENIED_BY_HUMAN" and err.value.proposal_hash is None
+    assert inner.calls == 0
+    refuse_and_get_hash(provider, "a different request")  # others still wait for approval as normal
+
+
+def test_denying_after_approving_stops_the_request_going_through(policy, store):
+    inner, provider = gated(policy, store)
+    h = refuse_and_get_hash(provider)
+    store.approve(h, approved_by="alice")
+    store.deny(h, denied_by="bob")
+    with pytest.raises(KernelRefusal) as err:
+        provider.chat_completion(request())
+    assert err.value.code == "KERNEL_DENIED_BY_HUMAN" and inner.calls == 0
+
+
+def test_a_human_can_deny_with_the_cli_and_the_api_says_so(api):
+    h = api.post("/v1/chat/completions", json=CHAT).json()["error"]["proposal_hash"]
+    assert cli("deny", h).returncode == 1  # not a terminal and no --yes
+    done = cli("deny", h, "--by", "alice", "--reason", "no thanks", "--yes")
+    assert done.returncode == 0, done.stderr
+    again = api.post("/v1/chat/completions", json=CHAT)
+    assert again.status_code == 403 and again.json()["error"]["code"] == "KERNEL_DENIED_BY_HUMAN"
+    assert h not in cli("approvals").stdout  # no longer waiting
+    assert cli("approve", h, "--yes").returncode == 1  # and cannot be approved now
+    assert cli("deny", h, "--yes").returncode == 1
+    assert cli("deny", "sha3-256:made-up", "--yes").returncode == 1
+
+
+def test_there_is_no_http_route_for_denying(api):
+    from nova.api import app
+
+    assert not [p for p in (getattr(r, "path", "") for r in app.routes) if "deny" in p.lower() or "denial" in p.lower()]
+    for path in ("/deny", "/v1/deny", "/node/deny"):
+        assert api.post(path, json={"proposal_hash": "x"}).status_code in (404, 405)

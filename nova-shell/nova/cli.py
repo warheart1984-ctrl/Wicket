@@ -107,9 +107,10 @@ def approvals_command(args: argparse.Namespace) -> int:
         return 2
     now = time.time()
     approved = {row.get("proposal_hash") for row in store.approvals() if float(row.get("expires_at", 0)) > now}
-    waiting = [row for row in store.pending() if row.get("proposal_hash") not in approved]
+    waiting = [row for row in store.waiting() if row.get("proposal_hash") not in approved]
     if args.json:
-        print(json.dumps({"pending": waiting, "approved": store.approvals()}, indent=2, sort_keys=True))
+        print(json.dumps({"pending": waiting, "approved": store.approvals(),
+                          "denied": store.denials()}, indent=2, sort_keys=True))
         return 0
     if not waiting:
         print("nothing is waiting for approval")
@@ -137,8 +138,40 @@ def approve_command(args: argparse.Namespace) -> int:
         if input("type 'yes' to approve: ").strip().lower() != "yes":
             print("not approved")
             return 1
-    entry = store.approve(args.proposal_hash, approved_by=args.by, expires_in=args.expires_in, uses=args.uses)
+    try:
+        entry = store.approve(args.proposal_hash, approved_by=args.by, expires_in=args.expires_in,
+                              uses=args.uses)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     print(f"approved: {entry['approval_id']} (expires {int(entry['expires_at'])})")
+    return 0
+
+
+def deny_command(args: argparse.Namespace) -> int:
+    store = _approval_store()
+    if store is None:
+        return 2
+    match = [row for row in store.pending() if row.get("proposal_hash") == args.proposal_hash]
+    if not match:
+        print(f"no pending request with hash {args.proposal_hash}", file=sys.stderr)
+        return 1
+    row = match[0]
+    print(f"deny: {row.get('action')} -> {row.get('target')} [{row.get('effect')}/{row.get('risk')}] "
+          "(final for this exact request)")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("refusing to deny without --yes when not run from a terminal", file=sys.stderr)
+            return 1
+        if input("type 'yes' to deny: ").strip().lower() != "yes":
+            print("not denied")
+            return 1
+    try:
+        entry = store.deny(args.proposal_hash, denied_by=args.by, reason=args.reason)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"denied: {entry['denial_id']}")
     return 0
 
 
@@ -177,6 +210,13 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--uses", type=int, default=1, help="how many times it may be used (default 1)")
     approve.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     approve.set_defaults(func=approve_command)
+
+    deny = sub.add_parser("deny", help="Deny one pending request by its proposal hash (final)")
+    deny.add_argument("proposal_hash")
+    deny.add_argument("--by", default=os.environ.get("USER", "operator"), help="who is denying")
+    deny.add_argument("--reason", default="", help="why (kept in the denials file)")
+    deny.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    deny.set_defaults(func=deny_command)
     return parser
 
 

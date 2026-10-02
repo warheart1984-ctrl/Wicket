@@ -43,6 +43,8 @@ def test_the_screen_works_in_a_real_browser_and_hostile_text_stays_inert(tmp_pat
     provider = IckGatedProvider(Fake(), IckGate(policy, log=log, anchor=anchor, approvals=store))
     with pytest.raises(KernelRefusal):
         provider.chat_completion({"messages": [{"role": "user", "content": "hi"}]})
+    with pytest.raises(KernelRefusal):
+        provider.chat_completion({"messages": [{"role": "user", "content": "a second request"}]})
 
     status = tmp_path / "publish-status.json"
     status.write_text(json.dumps({
@@ -69,7 +71,7 @@ def test_the_screen_works_in_a_real_browser_and_hostile_text_stays_inert(tmp_pat
     assert r["unauthorized"] == 1  # only the deliberate wrong-token probe
     assert r["login_shown"] and r["app_hidden_without_token"]
     assert "token" in r["wrong_token_message"].lower()
-    assert r["pending_rows"] == 1
+    assert r["pending_rows"] == 2
     assert r["hostile_rendered_literally"] is True and HOSTILE in r["target_text"]
     assert r["injected_elements"] == 0 and r["xss_ran"] is False
     assert r["hash_after_signin"] == ""  # the token was removed from the address bar
@@ -80,8 +82,14 @@ def test_the_screen_works_in_a_real_browser_and_hostile_text_stays_inert(tmp_pat
     assert any("anchor published" in chip for chip in r["chips"]), r["chips"]
     assert r["injected_in_chips"] == 0
     assert r["phone_horizontal_overflow"] is False
-    assert len(r["dialogs"]) == 1 and "Approve this request?" in r["dialogs"][0]
-    assert r["pending_hidden_after"] is True and r["approved_rows"] == 1
+    assert r["pending_after_cancel"] == 1  # cancelling the reason prompt denied nothing
+    assert [d.split(":")[0] for d in r["dialogs"]] == ["confirm", "confirm", "prompt", "confirm", "prompt"]
+    assert "Approve this request?" in r["dialogs"][0] and "Deny this request?" in r["dialogs"][1]
+    assert r["pending_hidden_after"] is False and r["pending_rows_before_deny"] == 1 and r["approved_rows"] == 1
+    assert r["pending_hidden_after_deny"] is True and r["denied_rows"] == 1
+    assert r["denied_by"] == "operator" and r["denied_reason"] == "too risky <b>x</b>"  # literal text
+    assert r["injected_in_denied"] == 0
+    assert len(store.denials()) == 1 and store.denials()[0]["reason"] == "too risky <b>x</b>"
     assert r["published_button_hidden"] is True  # no anchor repository is configured
     assert r["phone_pending_table_hidden"] is True and r["phone_published_button_hidden"] is True
     assert store.approvals()[0]["approved_by"] == "operator" == r["approved_by"]

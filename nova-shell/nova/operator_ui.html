@@ -75,7 +75,7 @@
       <h2>Waiting for approval</h2>
       <p class="muted" id="pending-empty">Nothing is waiting.</p>
       <table id="pending-table" hidden>
-        <thead><tr><th>Action</th><th>Target</th><th>Effect / risk</th><th>Asked</th><th>Approve</th></tr></thead>
+        <thead><tr><th>Action</th><th>Target</th><th>Effect / risk</th><th>Asked</th><th>Decide</th></tr></thead>
         <tbody id="pending-body"></tbody>
       </table>
       <div class="row muted gap-top">
@@ -90,6 +90,15 @@
       <table id="approved-table" hidden>
         <thead><tr><th>Approved by</th><th>Request</th><th>Uses left</th><th>Expires</th></tr></thead>
         <tbody id="approved-body"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Denied</h2>
+      <p class="muted" id="denied-empty">None.</p>
+      <table id="denied-table" hidden>
+        <thead><tr><th>Denied by</th><th>Request</th><th>Reason</th><th>When</th></tr></thead>
+        <tbody id="denied-body"></tbody>
       </table>
     </section>
 
@@ -199,7 +208,7 @@ function render(state) {
     tr.append(cell("Action", row.action), cell("Target", row.target, "mono"),
               cell("Effect / risk", (row.effect || "?") + " / " + (row.risk || "?")),
               cell("Asked", ago(row.requested_at)));
-    const actions = cell("Approve");
+    const actions = cell("Decide");
     const box = el("div", null, "row");
     const expires = el("select");
     expires.setAttribute("aria-label", "Expires after");
@@ -211,7 +220,9 @@ function render(state) {
     uses.value = "1"; uses.setAttribute("aria-label", "Number of uses");
     const button = el("button", "Approve"); button.type = "button";
     button.addEventListener("click", () => approve(row, Number(expires.value), Number(uses.value), button));
-    box.append(expires, el("span", "×", "muted"), uses, button);
+    const denyButton = el("button", "Deny"); denyButton.type = "button";
+    denyButton.addEventListener("click", () => deny(row, denyButton));
+    box.append(expires, el("span", "×", "muted"), uses, button, denyButton);
     actions.append(box); tr.append(actions); pending.append(tr);
   }
   $("pending-table").hidden = state.pending.length === 0;
@@ -225,6 +236,16 @@ function render(state) {
               cell("Uses left", row.remaining), cell("Expires", until(row.expires_at)));
     approved.append(tr);
   }
+  const denied = $("denied-body");
+  denied.replaceChildren();
+  for (const row of state.denied || []) {
+    const tr = el("tr");
+    tr.append(cell("Denied by", row.denied_by), cell("Request", short(row.proposal_hash, 24), "mono"),
+              cell("Reason", row.reason || ""), cell("When", ago(row.denied_at)));
+    denied.append(tr);
+  }
+  $("denied-table").hidden = (state.denied || []).length === 0;
+  $("denied-empty").hidden = (state.denied || []).length !== 0;
   $("approved-table").hidden = state.approved.length === 0;
   $("approved-empty").hidden = state.approved.length !== 0;
 
@@ -257,6 +278,21 @@ async function approve(row, expiresIn, uses, button) {
   try {
     await api("/api/approve", { proposal_hash: row.proposal_hash, expires_in: expiresIn, uses: uses,
                                 approved_by: $("by").value.trim() || "operator" });
+    banner("");
+  } catch (error) { banner(error.message); }
+  busy = false;
+  await refresh();
+}
+
+async function deny(row, button) {
+  const what = row.action + " → " + row.target;
+  if (!window.confirm("Deny this request?\n\n" + what + "\n\nThis is final for this exact request.")) return;
+  const reason = window.prompt("Reason (optional, kept in the denials file):", "");
+  if (reason === null) return;
+  busy = true; button.disabled = true;
+  try {
+    await api("/api/deny", { proposal_hash: row.proposal_hash, reason: reason.slice(0, 200),
+                             denied_by: $("by").value.trim() || "operator" });
     banner("");
   } catch (error) { banner(error.message); }
   busy = false;

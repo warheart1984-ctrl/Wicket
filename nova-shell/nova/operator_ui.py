@@ -1,5 +1,5 @@
 """A small operator screen: what Nova is waiting on, whether the receipt log can be trusted,
-and an Approve button.
+and Approve and Deny buttons.
 
     python -m nova.operator_ui --approvals F --state DIR --log LOG [--anchor A] [--nova-url URL]
 
@@ -17,8 +17,8 @@ How it is locked down:
   * No cross-origin access is granted, and the page's Content-Security-Policy allows only its
     own script, with a fresh nonce per response.
   * All data reaches the page as JSON and is written with textContent, never as HTML.
-It only reads receipts, and the only thing it can write is an approval record, using the same
-rules as `python -m nova.cli approve`.
+It only reads receipts, and the only things it can write are approval and denial records, using the same
+rules as `python -m nova.cli approve` and `deny`.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from nova.ick_approvals import ApprovalStore
 MAX_BODY = 4096
 MIN_EXPIRES, MAX_EXPIRES = 60, 24 * 3600
 MAX_USES = 100
+MAX_REASON = 200
 RECENT = 25
 _NAME = re.compile(r"^[A-Za-z0-9 ._@-]{1,64}$")
 
@@ -188,8 +189,9 @@ class OperatorApp:
             "nova": self._health(),
             "log": self._log(),
             "anchor_publish": self._anchor_publishing(),
-            "pending": [row for row in self.store.pending() if row.get("proposal_hash") not in covered],
+            "pending": [row for row in self.store.waiting() if row.get("proposal_hash") not in covered],
             "approved": active,
+            "denied": sorted(self.store.denials(), key=lambda r: r.get("denied_at", 0), reverse=True)[:20],
             "can_check_published": bool(self.config.anchor_repo and self.config.log),
             "limits": {"min_expires": MIN_EXPIRES, "max_expires": MAX_EXPIRES, "max_uses": MAX_USES},
         }
@@ -211,6 +213,18 @@ class OperatorApp:
             raise ValueError("approved_by may use letters, digits and . _ @ - only (64 max)")
         entry = self.store.approve(proposal_hash, approved_by=by, expires_in=expires_in, uses=uses)
         return {"approval_id": entry["approval_id"], "expires_at": entry["expires_at"], "uses": entry["uses"]}
+
+    def deny(self, body: dict[str, Any]) -> dict[str, Any]:
+        proposal_hash, reason = body.get("proposal_hash"), body.get("reason") or ""
+        by = body.get("denied_by") or "operator"
+        if not isinstance(proposal_hash, str) or not proposal_hash:
+            raise ValueError("proposal_hash is required")
+        if not isinstance(reason, str) or len(reason) > MAX_REASON:
+            raise ValueError(f"reason must be text of at most {MAX_REASON} characters")
+        if not isinstance(by, str) or not _NAME.match(by):
+            raise ValueError("denied_by may use letters, digits and . _ @ - only (64 max)")
+        entry = self.store.deny(proposal_hash, denied_by=by, reason=reason)
+        return {"denial_id": entry["denial_id"]}
 
     def check_published(self) -> dict[str, Any]:
         if not (self.config.anchor_repo and self.config.log):
@@ -315,7 +329,7 @@ def make_server(config: OperatorConfig, *, host: str = "127.0.0.1", port: int = 
                 self._json(404, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path not in ("/api/approve", "/api/check-published"):
+            if self.path not in ("/api/approve", "/api/deny", "/api/check-published"):
                 self._json(404, {"error": "not found"})
                 return
             if not self._guard(needs_token=True):
@@ -326,6 +340,8 @@ def make_server(config: OperatorConfig, *, host: str = "127.0.0.1", port: int = 
             try:
                 if self.path == "/api/approve":
                     self._json(200, app.approve(body))
+                elif self.path == "/api/deny":
+                    self._json(200, app.deny(body))
                 else:
                     self._json(200, app.check_published())
             except KeyError as exc:

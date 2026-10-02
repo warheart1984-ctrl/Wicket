@@ -219,6 +219,12 @@ class IckGate:
                 "action": action, "target": target, "effect": effect, "risk": risk,
                 "payload": proposal["payload"],
             })
+            if self.approvals.is_denied(proposal_hash):
+                raise KernelRefusal(
+                    code="KERNEL_DENIED_BY_HUMAN",
+                    message="a human denied this request",
+                    receipt_id=receipt_id,
+                )
             entry = self.approvals.claim(proposal_hash)
             if entry is not None:
                 # Same request again, now carrying the human's approval id.

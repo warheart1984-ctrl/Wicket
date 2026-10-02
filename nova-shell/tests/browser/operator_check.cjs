@@ -3,6 +3,7 @@
 const { chromium } = require("playwright");
 
 const [base, token, shots, hostile] = process.argv.slice(2);
+let cancelPrompt = false;
 const results = { errors: [], dialogs: [], unauthorized: 0 };
 
 (async () => {
@@ -17,7 +18,8 @@ try {
     if (/status of 401/.test(m.text())) results.unauthorized += 1;
     else results.errors.push("console: " + m.text());
   });
-  page.on("dialog", async (d) => { results.dialogs.push(d.message()); await d.accept(); });
+  page.on("dialog", async (d) => { results.dialogs.push(d.type() + ": " + d.message()); if (cancelPrompt && d.type() === "prompt") await d.dismiss();
+    else await d.accept(d.type() === "prompt" ? "too risky <b>x</b>" : undefined); });
 
   // 1. no token -> the sign-in form, and no data
   await page.goto(base + "/");
@@ -63,6 +65,24 @@ try {
   results.approved_by = await page.locator("#approved-body tr td:nth-child(1)").first().textContent();
   results.published_button_hidden = await page.locator("#published-row").isHidden();  // no repo configured
   await page.screenshot({ path: `${shots}/operator-approved.png`, fullPage: true });
+
+  // 6a. cancelling the reason prompt must not deny anything
+  cancelPrompt = true;
+  await page.locator("#pending-body button", { hasText: "Deny" }).first().click();
+  await page.waitForTimeout(500);
+  results.pending_after_cancel = await page.locator("#pending-body tr").count();
+  cancelPrompt = false;
+
+  // 6. deny the other one: it leaves the pending list and shows under Denied, reason as plain text
+  results.pending_rows_before_deny = await page.locator("#pending-body tr").count();
+  await page.locator("#pending-body button", { hasText: "Deny" }).first().click();
+  await page.waitForSelector("#denied-table:not([hidden])");
+  results.pending_hidden_after_deny = await page.locator("#pending-table").isHidden();
+  results.denied_rows = await page.locator("#denied-body tr").count();
+  results.denied_by = await page.locator("#denied-body tr td:nth-child(1)").first().textContent();
+  results.denied_reason = await page.locator("#denied-body tr td:nth-child(3)").first().textContent();
+  results.injected_in_denied = await page.locator("#denied-body b").count();
+  await page.screenshot({ path: `${shots}/operator-denied.png`, fullPage: true });
   await page.setViewportSize({ width: 390, height: 800 });  // hidden things must stay hidden on a phone too
   results.phone_pending_table_hidden = await page.locator("#pending-table").isHidden();
   results.phone_published_button_hidden = await page.locator("#published-row").isHidden();

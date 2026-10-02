@@ -215,6 +215,39 @@ def test_approving_lets_the_request_through_exactly_once(op):
     assert state(op)["approved"] == []
 
 
+def test_denying_refuses_the_request_for_good_and_shows_in_the_list(op):
+    err = op.ask("do the thing")
+    status, _, data = op.call("POST", "/api/deny", {"proposal_hash": err.proposal_hash, "reason": "nope",
+                                                    "denied_by": "alice"})
+    assert status == 200 and json.loads(data)["denial_id"].startswith("denial-")
+    s = state(op)
+    assert s["pending"] == [] and s["approved"] == []
+    assert [(d["denied_by"], d["reason"]) for d in s["denied"]] == [("alice", "nope")]
+    assert op.ask("do the thing").code == "KERNEL_DENIED_BY_HUMAN"
+    assert op.call("POST", "/api/approve", {"proposal_hash": err.proposal_hash})[0] == 400  # cannot be undone here
+    assert op.call("POST", "/api/deny", {"proposal_hash": err.proposal_hash})[0] == 400
+
+
+def test_denying_takes_back_an_approval_already_given(op):
+    h = op.ask("do the thing").proposal_hash
+    assert op.call("POST", "/api/approve", {"proposal_hash": h, "uses": 5})[0] == 200
+    assert op.call("POST", "/api/deny", {"proposal_hash": h})[0] == 200
+    assert state(op)["approved"] == []
+    assert op.ask("do the thing").code == "KERNEL_DENIED_BY_HUMAN"
+
+
+def test_deny_input_is_checked_by_the_server(op):
+    h = op.ask().proposal_hash
+    bad = [{"proposal_hash": h, "reason": "x" * 201}, {"proposal_hash": h, "reason": 7},
+           {"proposal_hash": h, "denied_by": "<script>"}, {"proposal_hash": h, "denied_by": "x" * 65},
+           {"proposal_hash": ""}, {"proposal_hash": 7}, {}]
+    for body in bad:
+        assert op.call("POST", "/api/deny", body)[0] == 400, body
+    assert not op.store.denials_file.exists()
+    assert op.call("POST", "/api/deny", {"proposal_hash": "sha3-256:made-up"})[0] == 404
+    assert op.call("POST", "/api/deny", {"proposal_hash": h}, token=False)[0] == 401
+
+
 def test_approval_limits_are_enforced_by_the_server(op):
     h = op.ask().proposal_hash
     bad = [{"proposal_hash": h, "expires_in": 5}, {"proposal_hash": h, "expires_in": 10**9},
