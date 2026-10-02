@@ -6,3 +6,4 @@
 __pycache__/
 .pytest_cache/
 nova-shell/**/__pycache__/
+nova-audit.log

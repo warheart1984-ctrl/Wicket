@@ -77,7 +77,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 67 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 77 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -114,16 +114,29 @@ python -m nova.api
 - It **fails closed**: a missing `infinityctl` or any kernel error also stops the call
   (`KERNEL_UNAVAILABLE`). It never silently allows.
 - Only message counts and sizes go to the kernel, never the text.
-- Covered: `/v1/chat/completions` (including streaming), `/v1/completions`,
-  `/node/submit` and `/node/replay`, and the Ollama path used by `/v1/chat`.
-- **Not covered:** the node's local-model *tool* (`nova/node/tools/local_model.py`),
-  node federation calls, and `/v1/chat` with no provider set (it uses the built-in
-  stub, which contacts nothing). Calls to a model made outside Nova are not gated.
+- Covered, with tests that fail if the gate is removed:
+  - every route that calls a provider: `/v1/chat/completions` (including streaming),
+    `/v1/completions`, `/node/submit` and `/node/replay`;
+  - the Ollama path behind `/v1/chat` (the async `invoke` call);
+  - the node's local-model tool (`/node/tool`: code, wire, explain), checked once per
+    call, which covers both the Ollama attempt and the vLLM fallback;
+  - node gossip to peers (`gossip_to_peers`), checked once per peer as a `write`. A peer
+    that is refused shows `status: "refused"` in the results and nothing is sent.
+- Any refusal on any route becomes HTTP 403 through one app-wide handler, never a 500.
+- Gossip is a `write`, and the demo policy requires approval for writes, so with
+  `demo/policy.json` gossip waits and is refused. To allow it, use a policy with
+  `effects_requiring_approval: []`. Nova has no way to pass kernel approvals yet.
+- Not gated, on purpose: `/v1/chat` with no provider set. It uses the built-in stub,
+  which contacts nothing (a test proves that, with the network blocked).
+- Not checked: nothing in `nova/` runs shell commands or opens raw sockets, but a model
+  called from outside Nova is not gated. The local-model tool was checked with fakes, not
+  against a real Ollama or vLLM server.
 - Nova keeps its own receipts too. The two systems now sit side by side, with the
   kernel's receipt id included in Nova's reply. They are not merged into one log.
 
 ## Planned
 
-1. Gate the remaining paths listed above, or decide they should stay open.
-2. A helper that copies the latest anchor to an external place (a separate git repo).
-3. A minimal operator surface.
+1. Let Nova pass kernel approvals, so an `await_human_approval` verdict can be cleared.
+2. Make `/v1/chat` work with the external provider (it only supports Ollama today).
+3. A helper that copies the latest anchor to an external place (a separate git repo).
+4. A minimal operator surface.

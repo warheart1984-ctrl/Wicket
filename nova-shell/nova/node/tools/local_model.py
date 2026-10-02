@@ -4,6 +4,8 @@ import json
 import os
 import urllib.request
 
+from nova.ick import gate_action
+
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 DEFAULT_VLLM_URL = "http://localhost:8000/v1/completions"
@@ -12,6 +14,13 @@ DEFAULT_CODER_MODEL = "qwen2.5-coder:3b"
 
 def generate(prompt: str, *, model: str | None = DEFAULT_CODER_MODEL, temperature: float = 0.2, max_tokens: int = 2048) -> str:
     active_model = model or DEFAULT_CODER_MODEL
+    # One kernel check covers the Ollama attempt and the vLLM fallback below.
+    gate_action(
+        target=f"local_model:{active_model}",
+        action="chat_completion",
+        effect="read",
+        governed_request={"messages": [{"role": "user", "content": prompt}]},
+    )
     try:
         return _ollama_generate(prompt, active_model, temperature, max_tokens)
     except Exception:

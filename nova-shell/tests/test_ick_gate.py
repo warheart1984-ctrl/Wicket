@@ -121,9 +121,15 @@ def test_anchor_needs_a_log():
 # --- through the real HTTP API -------------------------------------------------------------
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
+    # Keep ledgers, rate-limit counters and the audit log out of the working directory, so
+    # these tests neither leave state behind nor use up another test's rate limit.
+    import nova.audit
     from fastapi.testclient import TestClient
     from nova.api import app
+
+    monkeypatch.setenv("NOVA_NODE_RUNTIME_DIR", str(tmp_path / "node"))
+    monkeypatch.setattr(nova.audit, "AUDIT_PATH", tmp_path / "nova-audit.log")
     return TestClient(app)
 
 
@@ -166,3 +172,129 @@ def test_api_is_unchanged_when_the_gate_is_off(client, monkeypatch):
     monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
     body = client.post("/v1/chat/completions", json=CHAT)
     assert body.status_code == 200 and body.json()["nova"]["ick"] is None
+
+
+# --- the paths that are not the OpenAI-style routes ------------------------------------------
+
+def _count_calls(monkeypatch, module, names):
+    calls = []
+    for name in names:
+        monkeypatch.setattr(module, name, lambda *a, _n=name, **k: calls.append(_n) or "generated")
+    return calls
+
+
+def test_local_model_tool_is_gated(monkeypatch, deny_policy):
+    from nova.node.tools import local_model
+
+    calls = _count_calls(monkeypatch, local_model, ["_ollama_generate", "_vllm_generate"])
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))
+    assert local_model.generate("hello") == "generated" and calls == ["_ollama_generate"]
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(deny_policy))
+    with pytest.raises(KernelRefusal) as err:
+        local_model.generate("hello")
+    assert err.value.code == "KERNEL_DENIED"
+    assert calls == ["_ollama_generate"]  # neither the Ollama call nor the vLLM fallback ran
+
+
+def test_local_model_tool_is_unchanged_when_the_gate_is_off(monkeypatch):
+    from nova.node.tools import local_model
+
+    calls = _count_calls(monkeypatch, local_model, ["_ollama_generate", "_vllm_generate"])
+    monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    assert local_model.generate("hello") == "generated" and calls == ["_ollama_generate"]
+
+
+@pytest.mark.parametrize("intent", ["code", "wire", "explain"])
+def test_every_node_tool_returns_403_when_the_kernel_denies(client, monkeypatch, deny_policy, intent):
+    from nova.node.tools import local_model
+
+    calls = _count_calls(monkeypatch, local_model, ["_ollama_generate", "_vllm_generate"])
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(deny_policy))
+    response = client.post("/node/tool", json={"intent": intent, "instruction": "x", "current_code": "y"})
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "KERNEL_DENIED"
+    assert calls == []
+
+
+def _gossip_setup(monkeypatch, tmp_path):
+    from nova.node import federation
+
+    sent = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(federation, "load_peers", lambda: [
+        {"peer_id": "p1", "endpoint": "http://peer-one.test"},
+        {"peer_id": "p2", "endpoint": "http://peer-two.test"}])
+    monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
+    monkeypatch.setattr(federation.urllib.request, "urlopen",
+                        lambda request, timeout=None: sent.append(request.full_url) or Response())
+    return federation, sent
+
+
+def test_gossip_waits_for_approval_under_the_demo_policy(monkeypatch, tmp_path):
+    federation, sent = _gossip_setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))  # writes need approval
+    results = federation.gossip_to_peers()
+    assert [r["status"] for r in results] == ["refused", "refused"]
+    assert results[0]["error"] == "KERNEL_AWAITING_APPROVAL"
+    assert sent == []  # nothing left the node
+
+
+def test_gossip_goes_out_when_the_policy_allows_writes(monkeypatch, tmp_path):
+    federation, sent = _gossip_setup(monkeypatch, tmp_path)
+    policy = tmp_path / "open.json"
+    policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-open-v1",
+                                  "denied_effects": [], "effects_requiring_approval": []}))
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
+    results = federation.gossip_to_peers()
+    assert [r["status"] for r in results] == [200, 200]
+    assert sent == ["http://peer-one.test/node/gossip", "http://peer-two.test/node/gossip"]
+
+
+def test_gossip_is_unchanged_when_the_gate_is_off(monkeypatch, tmp_path):
+    federation, sent = _gossip_setup(monkeypatch, tmp_path)
+    monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    assert [r["status"] for r in federation.gossip_to_peers()] == [200, 200] and len(sent) == 2
+
+
+def test_async_invoke_path_is_gated(deny_policy):
+    import asyncio
+
+    class Inner:
+        model, provider_id, calls = "m", "ollama", 0
+
+        async def invoke(self, messages, **kwargs):
+            self.calls += 1
+            return "reply"
+
+    inner = Inner()
+    messages = [{"role": "user", "content": "hi"}]
+    assert asyncio.run(IckGatedProvider(inner, IckGate(DEMO_POLICY)).invoke(messages)) == "reply"
+    with pytest.raises(KernelRefusal):
+        asyncio.run(IckGatedProvider(inner, IckGate(deny_policy)).invoke(messages))
+    assert inner.calls == 1
+
+
+def test_builtin_stub_chat_contacts_nothing(client, monkeypatch, deny_policy):
+    """/v1/chat with no provider uses the built-in stub: it never touches the network, so
+    there is nothing for the kernel to gate and it answers even under a deny policy."""
+    import socket
+    import urllib.request
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the stub made a network call")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(socket, "create_connection", boom)
+    monkeypatch.delenv("NOVA_PROVIDER", raising=False)
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(deny_policy))
+    response = client.post("/v1/chat", json={"prompt": "hello"})
+    assert response.status_code == 200 and response.json()["decision"] == "EXECUTED"
