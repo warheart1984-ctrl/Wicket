@@ -5,3 +5,4 @@
 .runtime/
 __pycache__/
 .pytest_cache/
+nova-shell/**/__pycache__/
