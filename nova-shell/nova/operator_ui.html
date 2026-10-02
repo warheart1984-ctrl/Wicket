@@ -176,6 +176,16 @@ function render(state) {
       chips.append(chip(log.allows_without_outcome + " allowed without an outcome", "warn"));
     }
     chips.append(chip(log.anchored ? "anchor on" : "no anchor", log.anchored ? "ok" : "warn"));
+    const pub = state.anchor_publish;
+    if (!pub.monitored) chips.append(chip("anchor publishing: not monitored", "warn"));
+    else if (!pub.known) chips.append(chip("anchor has never been published", "bad"));
+    else {
+      const behind = pub.unpublished_records ? " · " + pub.unpublished_records + " entries not yet published" : "";
+      if (pub.integrity_failure) chips.append(chip("ANCHOR PUBLISH REFUSED (possible tampering): " + (pub.last_error || ""), "bad"));
+      else if (pub.consecutive_failures) chips.append(chip("anchor publishing failing (" + pub.consecutive_failures + " in a row): " + (pub.last_error || ""), "bad"));
+      if (pub.last_success_at === null) chips.append(chip("anchor never published successfully", "bad"));
+      else chips.append(chip("anchor published " + ago(pub.last_success_at) + behind, pub.stale ? "bad" : "ok"));
+    }
     if (!log.signatures.checked) chips.append(chip("signatures: not checked", "warn"));
     else if (log.verified && log.signatures.authenticated) chips.append(chip("signatures verified", "ok"));
     else if (log.verified) chips.append(chip("NOT AUTHENTICATED: no signatures", "bad"));

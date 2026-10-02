@@ -29,7 +29,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (63 pass)
+python -m pytest        # offline tests, no keys needed (81 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -157,6 +157,61 @@ account, or a branch where force-pushes and deletions are blocked). Receipts add
 last `publish` are not covered until the next one. Authentication is whatever git already
 has. Tested against a local git repository, not against a hosted one yet.
 
+#### Publishing on a schedule
+
+The anchor only protects what it has already published, so publishing has to happen regularly and,
+just as important, you have to be able to tell when it has stopped.
+
+```bash
+python -m runtime.anchor_git watch --anchor A.jsonl --repo <git url> --status-file publish-status.json \
+    --interval 300 [--log LOG --trusted-keys KEYS --require-signatures]
+```
+
+- Publishes every `--interval` seconds (default 300) and stops cleanly on Ctrl+C or SIGTERM. A failed
+  publish (network, credentials) is retried after a growing delay: it doubles each time, up to
+  `--max-backoff` (default: 1800 seconds, or the interval if that is longer). The loop never exits
+  because of an error; being stale or failing is how a problem is noticed.
+- A **refusal** (the log does not match its anchor, or the local anchor does not continue what was
+  published) is a different thing. It is reported as `INTEGRITY REFUSAL (needs a person, not a retry)`,
+  flagged in the status file, and not retried any faster. It may mean tampering.
+- `--status-file` records each attempt: when it last succeeded, how many records are published, the
+  failures in a row, the last error (one line, URL credentials hidden), and whether the last refusal was an
+  integrity refusal. It never contains the repository URL. It is written atomically. The one-shot
+  `publish` takes `--status-file` too, so a cron job feeds the same display.
+- The **operator screen** (`--anchor-status FILE`, `--anchor-stale-after SECONDS`, default 900) shows
+  `anchor published 41s ago`, how many entries are **not yet published** (a rollback of those would go
+  unnoticed), `anchor publishing failing (N in a row)`, `ANCHOR PUBLISH REFUSED (possible tampering)`, or
+  `anchor has never been published`. Set the stale threshold to a few times your interval.
+
+Ways to run it (nothing starts it for you):
+
+```cron
+# one-shot every 5 minutes; also records its status
+*/5 * * * *  /opt/infinity/venv/bin/python -m runtime.anchor_git publish --anchor /var/lib/infinity/a.jsonl \
+             --repo git@anchors.example:org/anchors.git --status-file /var/lib/anchor-publisher/status.json
+```
+
+```ini
+# /etc/systemd/system/anchor-publisher.service
+[Service]
+User=anchor-publisher
+ExecStart=/opt/infinity/venv/bin/python -m runtime.anchor_git watch --anchor /var/lib/infinity/a.jsonl \
+          --repo git@anchors.example:org/anchors.git --status-file /var/lib/anchor-publisher/status.json
+Restart=always
+```
+
+**Where to run it matters more than how.** Run the publisher as a *different user (or machine)* than
+Nova. It needs read access to the log and anchor, and push access to the anchor repository, and **Nova
+must not have those push credentials**. If the process that writes the log can also push, anyone who
+compromises it can rewrite the published history too, and the whole mechanism protects nothing.
+Likewise the status file is written by the publisher, so the operator screen shows what the publisher
+*says*; the real check is `python -m runtime.anchor_git verify`, run from somewhere independent.
+
+Limits: protection is only as recent as the last successful publish (the screen counts the entries since),
+and the interval is the window in which a rollback could go unnoticed. A publisher host that is itself
+compromised can fake a healthy status. Not covered by tests: a hosted git service (tested with a local
+repository).
+
 ## Nova shell
 
 `nova-shell/` is the Python core of the lawful Nova shell, brought over from
@@ -168,7 +223,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 159 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 176 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -305,7 +360,6 @@ Browser tests need Node with Playwright and Chromium and are skipped when those 
 
 ## Planned
 
-1. Publish the anchor automatically (on a timer, or every N turns) instead of by hand.
-2. A "deny" action on the operator screen, and a way to close or expire old pending requests.
-3. Run the signer as a separate process under another user, so the Nova process never holds the key.
-4. Strict JSON contracts for the proposal, policy and decision formats too.
+1. A "deny" action on the operator screen, and a way to close or expire old pending requests.
+2. Run the signer as a separate process under another user, so the Nova process never holds the key.
+3. Strict JSON contracts for the proposal, policy and decision formats too.
