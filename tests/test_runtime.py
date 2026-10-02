@@ -108,7 +108,7 @@ def test_anchor_catches_deleted_tail_that_the_chain_alone_misses(tmp_path):
     for text in ("one", "two", "three"):
         run_turn(text, "groq", kernel, client=client)
     assert kernel.verify() is True
-    log.write_text("\n".join(log.read_text().splitlines()[:2]) + "\n")  # drop the last receipt
+    log.write_text("\n".join(log.read_text().splitlines()[:-1]) + "\n")  # drop only the last entry
     assert Kernel(receipt_log=log).verify() is True  # chain only: fooled
     assert kernel.verify() is False  # chain + anchor: caught
     with pytest.raises(KernelError, match="deleted"):
@@ -119,3 +119,78 @@ def test_anchor_catches_deleted_tail_that_the_chain_alone_misses(tmp_path):
 def test_anchor_requires_a_log():
     with pytest.raises(KernelError, match="anchor needs"):
         Kernel(anchor=Path("a.jsonl"))
+
+
+# --- outcomes: what the model call did, recorded in the same chain ---------------------------
+
+from runtime.kernel import sha256_text  # noqa: E402
+
+
+def entries_of(log):
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def test_a_turn_records_its_outcome_in_the_same_chain(tmp_path):
+    log, anchor = tmp_path / "r.jsonl", tmp_path / "safe" / "a.jsonl"
+    kernel = Kernel(receipt_log=log, anchor=anchor)
+    result = run_turn("my private question", "groq", kernel, client=FakeClient("the private answer"))
+    decision, outcome = entries_of(log)
+    assert decision["verdict"] == "allow" and decision["version"] == "infinity.receipt.v2"
+    assert outcome["decision_receipt_id"] == decision["receipt_id"] == result.receipt_id
+    assert outcome["status"] == "completed" and result.outcome_receipt_id == outcome["receipt_id"]
+    assert outcome["response_sha256"] == sha256_text("the private answer")
+    assert "private" not in log.read_text() + anchor.read_text()
+    assert kernel.verify() is True
+
+
+def test_receipts_carry_a_real_utc_time(tmp_path):
+    import re
+
+    log = tmp_path / "r.jsonl"
+    run_turn("hi", "groq", Kernel(receipt_log=log), client=FakeClient())
+    for entry in entries_of(log):
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", entry["issued_at"]), entry["issued_at"]
+
+
+def test_a_failing_provider_is_recorded_as_failed_and_the_error_survives(tmp_path):
+    class Failing:
+        def __call__(self, url, payload, headers):
+            raise ProviderError("nope")
+
+    log = tmp_path / "r.jsonl"
+    with pytest.raises(ProviderError, match="nope"):
+        run_turn("hi", "groq", Kernel(receipt_log=log), client=Failing())
+    assert entries_of(log)[1]["status"] == "failed" and entries_of(log)[1]["response_sha256"] is None
+
+
+def test_if_the_outcome_cannot_be_recorded_the_reply_is_withheld(tmp_path):
+    import sys
+
+    from runtime.kernel import find_binary
+
+    real = find_binary()
+    fake = tmp_path / "infinityctl"
+    fake.write_text(f"#!{sys.executable}\nimport os, sys\n"
+                    "if sys.argv[1] == 'record-outcome':\n    sys.stderr.write('disk full'); sys.exit(1)\n"
+                    f"os.execv({real!r}, [{real!r}] + sys.argv[1:])\n")
+    fake.chmod(0o755)
+    kernel = Kernel(receipt_log=tmp_path / "r.jsonl", binary=str(fake))
+    with pytest.raises(KernelError, match="disk full"):
+        run_turn("hi", "groq", kernel, client=FakeClient("an answer nobody sees"))
+
+
+def test_without_a_log_there_is_no_outcome_and_nothing_breaks():
+    result = run_turn("hi", "groq", Kernel(), client=FakeClient())
+    assert result.reply == "Paris." and result.outcome_receipt_id is None
+
+
+def test_editing_an_outcome_is_detected(tmp_path):
+    log = tmp_path / "r.jsonl"
+    kernel = Kernel(receipt_log=log)
+    run_turn("hi", "groq", kernel, client=FakeClient("honest answer"))
+    assert kernel.verify() is True
+    lines = log.read_text().splitlines()
+    outcome = json.loads(lines[1])
+    outcome["response_sha256"] = sha256_text("a different answer")
+    log.write_text(lines[0] + "\n" + json.dumps(outcome) + "\n")
+    assert kernel.verify() is False

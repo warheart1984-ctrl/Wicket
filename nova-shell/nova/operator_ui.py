@@ -89,15 +89,23 @@ class OperatorApp:
             if isinstance(row, dict):
                 receipts.append(row)
         verified, message = self._verify(log, self.config.anchor)
+        outcomes = [r for r in receipts if "decision_receipt_id" in r]
+        answered = {r["decision_receipt_id"] for r in outcomes}
+        allows = [r for r in receipts if r.get("verdict") == "allow"]
         return {
             "present": True,
             "count": len(receipts),
+            "outcomes": len(outcomes),
+            # an allow with no outcome: still running, or the call never finished or was not recorded
+            "allows_without_outcome": sum(1 for r in allows if r.get("receipt_id") not in answered),
             "verified": verified,
             "message": message,
             "anchored": self.config.anchor is not None,
             "recent": [
-                {"n": index + 1, "receipt_id": r.get("receipt_id"), "verdict": r.get("verdict"),
-                 "reason_codes": r.get("reason_codes"), "proposal_hash": r.get("proposal_hash")}
+                {"n": index + 1, "receipt_id": r.get("receipt_id"),
+                 "verdict": r.get("verdict") or f"outcome: {r.get('status')}",
+                 "reason_codes": r.get("reason_codes") or [], "proposal_hash": r.get("proposal_hash"),
+                 "issued_at": r.get("issued_at")}
                 for index, r in list(enumerate(receipts))[-RECENT:][::-1]
             ],
         }

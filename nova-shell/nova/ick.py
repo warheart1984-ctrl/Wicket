@@ -42,6 +42,36 @@ class KernelRefusal(ProviderError):
         self.proposal_hash = proposal_hash
 
 
+class OutcomeNotRecorded(ProviderError):
+    """The model call ran but its outcome could not be written to the receipt log.
+
+    The reply is withheld: no evidence, no answer. (For a stream the text has already gone out,
+    so there the gap is reported by `verify-log` as an allow with no outcome instead.)"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(code="KERNEL_OUTCOME_NOT_RECORDED", message=message)
+
+
+def sha256_text(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def reply_text(result: Any) -> str:
+    """The reply text of a `chat_completion` result, or '' if it has none."""
+    try:
+        return str(result["completion"]["choices"][0]["message"]["content"] or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def delta_text(chunk: Any) -> str:
+    """The text carried by one streamed chunk (OpenAI style), or ''."""
+    try:
+        return str(chunk["choices"][0]["delta"].get("content") or "")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return ""
+
+
 def _find_binary(explicit: str | None) -> str:
     candidates = [explicit or ""]
     for parent in list(_HERE.parents)[:4]:
@@ -118,6 +148,33 @@ class IckGate:
             )
         return json.loads(done.stdout)
 
+    def record_outcome(self, ick: dict[str, str], *, status: str, response_text: str | None) -> str | None:
+        """Append an outcome entry (completed / failed) for the allow described by `ick`.
+
+        Returns its receipt id, or None when no receipt log is configured (nothing to chain to).
+        Raises OutcomeNotRecorded if it cannot be written."""
+        if self.log is None:
+            return None
+        try:
+            binary = _find_binary(self.binary)
+        except KernelRefusal as exc:
+            raise OutcomeNotRecorded(exc.message) from exc
+        cmd = [binary, "record-outcome", "--log", str(self.log), "--decision-receipt", ick["receipt_id"],
+               "--status", status]
+        if self.anchor:
+            cmd += ["--anchor", str(self.anchor)]
+        if ick.get("request_sha256"):
+            cmd += ["--request-sha256", ick["request_sha256"]]
+        if response_text is not None:
+            cmd += ["--response-sha256", sha256_text(response_text)]
+        try:
+            done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OutcomeNotRecorded(str(exc)) from exc
+        if done.returncode != 0:
+            raise OutcomeNotRecorded(done.stderr.strip() or f"infinityctl exited {done.returncode}")
+        return str(json.loads(done.stdout)["outcome"]["receipt_id"])
+
     def check(
         self,
         *,
@@ -144,8 +201,9 @@ class IckGate:
         out = self._run(proposal, [])
         verdict = str(out["decision"]["verdict"])
         receipt_id = str(out["receipt"]["receipt_id"])
+        evidence = _evidence(proposal)
         if verdict == "allow":
-            return {"verdict": verdict, "receipt_id": receipt_id}
+            return {"verdict": verdict, "receipt_id": receipt_id, **evidence}
         proposal_hash = str(out["decision"]["proposal_hash"])
         codes = ",".join(out["decision"].get("reason_codes") or [])
         if verdict == "await_human_approval" and self.approvals is not None:
@@ -164,6 +222,7 @@ class IckGate:
                         "receipt_id": str(approved["receipt"]["receipt_id"]),
                         "approval_id": str(entry["approval_id"]),
                         "approved_by": str(entry.get("approved_by", "")),
+                        **evidence,
                     }
         raise KernelRefusal(
             code="KERNEL_AWAITING_APPROVAL" if verdict == "await_human_approval" else "KERNEL_DENIED",
@@ -171,6 +230,12 @@ class IckGate:
             receipt_id=receipt_id,
             proposal_hash=proposal_hash if verdict == "await_human_approval" else None,
         )
+
+
+def _evidence(proposal: dict[str, Any]) -> dict[str, str]:
+    """The request's hash, in the `sha256:<hex>` form an outcome record uses (hash only)."""
+    digest = proposal["payload"].get("request_sha256")
+    return {"request_sha256": "sha256:" + digest} if digest else {}
 
 
 def build_proposal(
@@ -235,22 +300,53 @@ class IckGatedProvider:
         name = getattr(self._inner, "provider_id", None) or type(self._inner).__name__
         return f"{name}:{getattr(self._inner, 'model', 'unknown')}"
 
+    def _finish(self, ick: dict[str, str], *, status: str, text: str | None, strict: bool) -> str | None:
+        """Record the outcome. A failed call is recorded best-effort, since the real error matters
+        more; for a completed one, `strict` raises OutcomeNotRecorded and the reply is withheld."""
+        try:
+            return self._gate.record_outcome(ick, status=status, response_text=text)
+        except OutcomeNotRecorded:
+            if strict:
+                raise
+            return None
+
     def chat_completion(self, governed_request: dict[str, Any]) -> dict[str, Any]:
         ick = self._gate.check(target=self._target(), governed_request=governed_request)
-        result = self._inner.chat_completion(governed_request)
-        return {**result, "ick": ick}
+        try:
+            result = self._inner.chat_completion(governed_request)
+        except BaseException:
+            self._finish(ick, status="failed", text=None, strict=False)
+            raise
+        outcome = self._finish(ick, status="completed", text=reply_text(result), strict=True)
+        return {**result, "ick": {**ick, **({"outcome_receipt_id": outcome} if outcome else {})}}
 
     async def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
         request = {"messages": [{"content": getattr(m, "content", None) or m.get("content", "")} for m in messages]}
-        self._gate.check(target=self._target(), governed_request=request)
-        return await self._inner.invoke(messages, **kwargs)
+        ick = self._gate.check(target=self._target(), governed_request=request)
+        try:
+            response = await self._inner.invoke(messages, **kwargs)
+        except BaseException:
+            self._finish(ick, status="failed", text=None, strict=False)
+            raise
+        self._finish(ick, status="completed", text=str(getattr(response, "content", "") or ""), strict=True)
+        return response
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._inner, name)  # AttributeError if the inner provider lacks it
         if name == "chat_completion_stream":
             def gated(governed_request: dict[str, Any]) -> Iterator[dict[str, Any]]:
-                self._gate.check(target=self._target(), governed_request=governed_request)
-                yield from attr(governed_request)
+                ick = self._gate.check(target=self._target(), governed_request=governed_request)
+                parts: list[str] = []
+                finished = False
+                try:
+                    for chunk in attr(governed_request):
+                        parts.append(delta_text(chunk))
+                        yield chunk
+                    finished = True
+                finally:
+                    # Text already sent cannot be withdrawn, so a stream never raises here.
+                    self._finish(ick, status="completed" if finished else "failed",
+                                 text="".join(parts) if finished else None, strict=False)
 
             return gated
         return attr
@@ -271,6 +367,25 @@ def gate_action(
     return gate.check(
         target=target, governed_request=governed_request, action=action, effect=effect, risk=risk
     )
+
+
+def gate_outcome(
+    ick: dict[str, str] | None,
+    *,
+    status: str,
+    response_text: str | None = None,
+    strict: bool = True,
+) -> str | None:
+    """Record what happened after a `gate_action` allow. A no-op when the gate was off."""
+    gate = IckGate.from_env()
+    if ick is None or gate is None:
+        return None
+    try:
+        return gate.record_outcome(ick, status=status, response_text=response_text)
+    except OutcomeNotRecorded:
+        if strict:
+            raise
+        return None
 
 
 def gate_provider(provider: Any) -> Any:

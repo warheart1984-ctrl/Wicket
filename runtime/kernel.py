@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -17,6 +18,11 @@ DEFAULT_POLICY = ROOT / "demo" / "policy.json"
 
 class KernelError(RuntimeError):
     pass
+
+
+def sha256_text(text: str) -> str:
+    """`sha256:<hex>` of text, the form outcome records use. Only the hash is ever logged."""
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -76,6 +82,33 @@ class Kernel:
         out = json.loads(done.stdout)
         decision, receipt = out["decision"], out["receipt"]
         return Decision(decision["verdict"], list(decision.get("reason_codes") or []), receipt)
+
+    def record_outcome(
+        self,
+        decision_receipt_id: str,
+        *,
+        status: str,
+        request_sha256: str | None = None,
+        response_sha256: str | None = None,
+    ) -> str | None:
+        """Append an outcome (completed / failed) for an `allow`, chained to the same log.
+
+        Returns the outcome's receipt id, or None if no receipt log is configured. Raises
+        KernelError if it cannot be written."""
+        if not self.receipt_log:
+            return None
+        cmd = [self.binary, "record-outcome", "--log", str(self.receipt_log),
+               "--decision-receipt", decision_receipt_id, "--status", status]
+        if self.anchor:
+            cmd += ["--anchor", str(self.anchor)]
+        if request_sha256:
+            cmd += ["--request-sha256", request_sha256]
+        if response_sha256:
+            cmd += ["--response-sha256", response_sha256]
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if done.returncode != 0:
+            raise KernelError(done.stderr.strip() or f"infinityctl exited {done.returncode}")
+        return str(json.loads(done.stdout)["outcome"]["receipt_id"])
 
     def verify(self) -> bool:
         """True if the receipt log is an unbroken chain that matches its anchor (if any)."""

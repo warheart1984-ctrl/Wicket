@@ -38,7 +38,8 @@
   .gap-top { margin-top:10px; }
   .badge { border-radius:6px; padding:1px 8px; font-size:12.5px; }
   .badge.allow { background:var(--okbg); color:var(--ok); }
-  .badge.deny { background:var(--badbg); color:var(--bad); }
+  .badge.deny, .badge.outcomefailed { background:var(--badbg); color:var(--bad); }
+  .badge.outcomecompleted { background:var(--okbg); color:var(--ok); }
   .badge.await_human_approval { background:var(--warnbg); color:var(--warn); }
   #banner { display:none; margin-bottom:14px; }
   #banner.show { display:block; }
@@ -49,6 +50,7 @@
     tr { border-top:1px solid var(--line); padding:8px 0; }
     td { border:0; padding:3px 0; }
     td::before { content:attr(data-label); display:block; color:var(--muted); font-size:12px; }
+    td:empty { display:none; }  /* no label over an empty value */
   }
 </style>
 </head>
@@ -95,7 +97,7 @@
       <h2>Recent receipts</h2>
       <p class="muted" id="receipts-empty">No receipt log yet.</p>
       <table id="receipts-table" hidden>
-        <thead><tr><th>#</th><th>Verdict</th><th>Reason</th><th>Receipt</th></tr></thead>
+        <thead><tr><th>#</th><th>When (UTC)</th><th>Verdict</th><th>Reason</th><th>Receipt</th></tr></thead>
         <tbody id="receipts-body"></tbody>
       </table>
       <div class="row gap-top" id="published-row" hidden>
@@ -169,7 +171,10 @@ function render(state) {
   if (!log.present) chips.append(chip("Receipt log: none yet", "warn"));
   else {
     chips.append(chip(log.verified ? "Receipt log verified" : "RECEIPT LOG NOT VERIFIED", log.verified ? "ok" : "bad"));
-    chips.append(chip(log.count + " receipts"));
+    chips.append(chip(log.count + " receipts" + (log.outcomes ? " (" + log.outcomes + " outcomes)" : "")));
+    if (log.allows_without_outcome) {
+      chips.append(chip(log.allows_without_outcome + " allowed without an outcome", "warn"));
+    }
     chips.append(chip(log.anchored ? "anchor on" : "no anchor", log.anchored ? "ok" : "warn"));
     if (!log.verified) chips.append(chip(log.message, "bad"));
   }
@@ -216,7 +221,8 @@ function render(state) {
   for (const row of recent) {
     const tr = el("tr");
     const verdict = cell("Verdict"); verdict.append(el("span", row.verdict, "badge " + String(row.verdict).replace(/[^a-z_]/g, "")));
-    tr.append(cell("#", row.n), verdict, cell("Reason", (row.reason_codes || []).join(", ")),
+    tr.append(cell("#", row.n), cell("When (UTC)", String(row.issued_at || "").replace("T", " ").replace("Z", "")),
+              verdict, cell("Reason", (row.reason_codes || []).join(", ")),
               cell("Receipt", short(row.receipt_id, 34), "mono"));
     receipts.append(tr);
   }

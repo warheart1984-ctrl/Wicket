@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"kernel refused: {exc}", file=sys.stderr)
         return 3
     print(f"[kernel: {result.verdict} {','.join(result.reason_codes)}] {result.receipt_id}")
+    if result.outcome_receipt_id:
+        print(f"[outcome recorded] {result.outcome_receipt_id}")
     if result.reply is None:
         print("(no model call was made)")
         return 1

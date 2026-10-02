@@ -11,12 +11,16 @@ client ──► Nova API ──► ICK kernel ──► allow ──► model p
 (app, tool)  :8080        │  judges one               │
                           │  proposal                 ▼
                           ├─► deny ───────────► 403   reply + the kernel's receipt id
-                          └─► await ──► 403 + hash ──► pending list
+                          └─► await ──► 403 + hash ──► pending list     │
+                                                                         ▼
+                                    after the call: an *outcome* entry (completed / failed,
+                                    hashes of the request and reply, never their text)
                                                           │
  human ──► operator screen / CLI ── approve (one request, expires, limited uses) ──┘
                                       (a separate process; the Nova API cannot approve)
 
-every decision ──► receipt log, if one is configured (each receipt names the one before it)
+every decision and outcome ──► receipt log, if one is configured (each entry names the one before it,
+                                and carries the time it was issued, which the hash covers)
                     ──► anchor file (log length + latest receipt id)
                     ──► copied to a separate git repo, so deleting the newest receipts is caught
 ```
@@ -25,8 +29,8 @@ every decision ──► receipt log, if one is configured (each receipt names t
 
 | Piece | What it does | Lives in |
 |---|---|---|
-| **ICK kernel** (Rust) | Judges a proposal: `allow`, `deny` or `await_human_approval`, and signs a receipt. Never calls a model. | `crates/`, `contracts/` |
-| **Receipt chain + anchor** | Each receipt includes the previous one's id, so editing one breaks the rest. The anchor records the log's length and head, which also catches deleted *newest* receipts. | kernel CLI (`--log`, `--anchor`) |
+| **ICK kernel** (Rust) | Judges a proposal: `allow`, `deny` or `await_human_approval`, and issues a hash-linked receipt (not a digital signature). Never calls a model. | `crates/`, `contracts/` |
+| **Receipt chain, outcomes, anchor** | Each entry includes the previous one's id, so editing one breaks the rest. After a model call an *outcome* entry is chained in, pointing at the `allow` that permitted it. The anchor records the log's length and head, which also catches deleted *newest* entries. | kernel CLI (`--log`, `--anchor`, `record-outcome`) |
 | **Nova shell** (Python) | The model-facing API (OpenAI-style) and CLI. Asks the kernel before every model call when `NOVA_ICK_POLICY` is set; fails closed if the kernel is missing. | `nova-shell/` |
 | **Human approvals** | A held request is parked with a hash; a person approves that exact request (expiry, use limit). The kernel's answer is always final. | `nova-shell/nova/ick_approvals.py` |
 | **Operator screen** | Pending requests with an Approve button, log status, recent receipts. Localhost only, token-protected, strict CSP. | `nova-shell/nova/operator_ui.py` |
@@ -37,8 +41,18 @@ every decision ──► receipt log, if one is configured (each receipt names t
 
 - **Kernel first, or no call.** Covered paths: every provider route, streaming, the node tool that calls
   a local model, node gossip. Not covered: a model called from outside Nova.
-- **Tampering is noticed.** Edited or removed receipts break the chain. Deleted newest receipts are
-  caught by the anchor, and by the *published* anchor even if the attacker edits both local files.
+- **Tampering is noticed.** Edited or removed entries break the chain, including the time each was
+  issued. Deleted newest entries are caught by the anchor, and by the *published* anchor even if the
+  attacker edits both local files.
+- **Every model call leaves a matching pair.** The decision (`allow`) and its outcome (`completed` or
+  `failed`, with SHA-256 hashes of the request and reply). The verifier rejects an outcome that answers
+  a deny, a pending request, a missing receipt, or an `allow` that already has one, and it counts allows
+  with no outcome. If the outcome cannot be written, the reply is withheld ("no evidence, no answer"),
+  except for streams, whose text has already been sent: there the gap shows up as an allow with no outcome.
+- **Receipts are hash-linked, not signed.** There is no key behind them, so someone who can rewrite the
+  whole log *and* its anchor can forge history. Times come from the clock of the machine that wrote
+  the entry: the hash makes a time tamper-evident afterwards, it does not prove the clock was right.
+  Old (v1) receipts are still accepted but their time was never covered by the hash.
 - **Approvals bind to one request.** Not reusable for a different request, expire, and are used up.
 - **Trust assumptions (these are yours to set up):**
   the approvals file must be writable only by the human operator, not by the Nova server;
@@ -50,7 +64,7 @@ every decision ──► receipt log, if one is configured (each receipt names t
 
 ```bash
 cargo build
-cd nova-shell && pip install -e . pytest PyYAML httpx && python -m pytest   # 128 pass, 4 skipped
+cd nova-shell && pip install -e . pytest PyYAML httpx && python -m pytest   # 149 pass, 4 skipped
 NOVA_ICK_POLICY=../demo/policy.json NOVA_PROVIDER=external \
 NOVA_EXTERNAL_URL=https://integrate.api.nvidia.com/v1 NOVA_EXTERNAL_API_KEY=... \
 NOVA_EXTERNAL_MODEL=nvidia/nemotron-3-super-120b-a12b python -m nova.api
@@ -59,14 +73,16 @@ Full instructions, settings and limits for each piece are in `README.md`.
 
 ## State of verification
 
-Tests: Rust 9, root Python 23, `nova-shell` 128 (+4 skipped). For the security-relevant rules, each
+Tests: Rust 25, root Python 40, `nova-shell` 149 (+4 skipped). For the security-relevant rules, each
 guard was removed in turn and a test failed. Run live against real Groq, NVIDIA and OpenRouter models:
 allow, deny, human approval, chained and anchored log, the operator screen in a real Chromium.
 
 **Not done / not verified:** publishing to a *hosted* git repo (tested with a local one); the
 local-model tool against a real Ollama or vLLM (tested with fakes); Windows file locking for the last use of an
-approval; no Deny button yet; anchors are published by hand, not on a schedule. One full-suite failure
-was seen once and could not be reproduced in about 30 later runs (cause unknown).
+approval; no Deny button yet; anchors are published by hand, not on a schedule; receipts are not signed with
+a key; only the new record formats have strict JSON contracts (`receipt.v2`, `outcome.v1`), the older proposal,
+policy and decision contracts still list required fields only. One full-suite failure was seen once and could
+not be reproduced in about 30 later runs (cause unknown).
 
 ## Where it came from
 
@@ -75,8 +91,10 @@ core only; desktop app, installers and packaging left out; one change to its cod
 header, which Groq requires). Everything else is new. The large Python AAIS application in
 `infinity` / `project-infinity` was **not** brought over.
 
-## The 11 branches, in merge order (each builds on the one before)
+## How it was built
 
-`bootstrap-ick` → `runtime-chat` → `receipt-chaining` → `log-anchor` → `nova-shell` →
-`nova-asks-kernel` → `gate-remaining-paths` → `nova-approvals` → `anchor-git-helper` →
-`fix-v1-chat-external` → `operator-surface`
+Eleven pull requests, each building on the one before:
+#1 kernel · #2 chat runtime · #3 receipt chaining · #4 log anchor · #5 Nova shell · #6 Nova asks the
+kernel · #7 gate the remaining paths · #8 human approvals · #9 anchor publisher · #10 `/v1/chat`
+fix · #11 operator screen. After that: real timestamps covered by the hash (receipt v2) and outcome
+records, which this overview now describes. A fresh build of `main` passes the tests listed above.

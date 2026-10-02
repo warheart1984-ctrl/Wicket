@@ -29,7 +29,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (23 pass)
+python -m pytest        # offline tests, no keys needed (40 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -47,6 +47,29 @@ been edited, the runtime refuses to take another turn and calls no provider.
 What the chain alone catches: an edited receipt, or one removed from the start or
 middle. What it does **not** catch: receipts deleted from the **end**, because nothing
 records how long the log should be.
+
+### Timestamps (receipt v2)
+
+Every entry records when it was issued (RFC 3339 UTC), and from receipt `v2` on the time is part
+of the hash, so editing it is detected. The command-line tool uses the current UTC time unless you
+pass `--issued-at`; the kernel library takes the time as an argument and stays deterministic. The
+time comes from the writing machine's clock: the hash makes a change *detectable*, it does not prove
+the clock was right. Old `v1` receipts still verify, but their time was never covered by the hash
+and they carried the placeholder `demo-provenance`.
+
+### Outcome records
+
+A decision says a call was *allowed*. An outcome says what *happened*. After a model call,
+`infinityctl record-outcome --log LOG --decision-receipt <id> --status completed|failed
+[--request-sha256 H] [--response-sha256 H]` appends an entry to the same chain. It holds SHA-256
+hashes of the request and the reply, never their text.
+
+`verify-log` rejects an outcome that does not answer an earlier `allow`, or answers one that
+already has an outcome, so "a model was called" always points at the decision that permitted it. It
+also reports `N allowed without an outcome`: calls still running, never finished, or whose outcome could
+not be written. The Nova gate and the small runtime record an outcome after every call; if it cannot be
+written the reply is withheld (for a stream, whose text is already out, the gap is reported instead).
+The typed contracts are `contracts/receipt.v2.json` and `contracts/outcome.v1.json`.
 
 ## Log anchor
 
@@ -103,7 +126,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 128 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 149 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -242,3 +265,5 @@ Browser tests need Node with Playwright and Chromium and are skipped when those 
 
 1. Publish the anchor automatically (on a timer, or every N turns) instead of by hand.
 2. A "deny" action on the operator screen, and a way to close or expire old pending requests.
+3. Sign receipts with a key, so forging history needs more than write access to the log.
+4. Strict JSON contracts for the proposal, policy and decision formats too.

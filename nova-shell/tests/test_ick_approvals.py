@@ -170,8 +170,9 @@ def test_the_receipt_log_records_the_wait_and_the_approved_call(policy, store, t
     inner, provider = gated(policy, store, log=log, anchor=anchor)
     store.approve(refuse_and_get_hash(provider), approved_by="alice")
     provider.chat_completion(request())
-    verdicts = [json.loads(line)["verdict"] for line in log.read_text().splitlines()]
-    assert verdicts == ["await_human_approval", "await_human_approval", "allow"]
+    kinds = [(e.get("verdict") or "outcome:" + e["status"])
+             for e in map(json.loads, log.read_text().splitlines())]
+    assert kinds == ["await_human_approval", "await_human_approval", "allow", "outcome:completed"]
     done = subprocess.run([BINARY, "verify-log", "--log", str(log), "--anchor", str(anchor)],
                           capture_output=True, text=True)
     assert done.returncode == 0, done.stderr

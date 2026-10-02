@@ -45,6 +45,9 @@ def system(tmp_path):
     return kernel, log, anchor, turns
 
 
+ENTRIES_PER_TURN = 2  # each turn writes a decision and, after the model call, its outcome
+
+
 def commits(remote, branch="anchors"):
     out = subprocess.run(["git", "--git-dir", remote, "log", "--format=%s", branch],
                          capture_output=True, text=True, check=True).stdout
@@ -58,7 +61,7 @@ def lines(path):
 def test_first_publish_creates_the_branch_with_the_anchor(system, remote):
     kernel, log, anchor, turns = system
     turns(3)
-    assert "published 3 new record" in publish(anchor, remote)
+    assert f"published {3 * ENTRIES_PER_TURN} new record" in publish(anchor, remote)
     assert published_anchor(remote) == lines(anchor)
     assert len(commits(remote)) == 1
 
@@ -68,8 +71,8 @@ def test_later_publishes_append_commits_and_never_rewrite(system, remote):
     turns(2)
     publish(anchor, remote)
     turns(2)
-    assert "published 2 new record" in publish(anchor, remote)
-    assert published_anchor(remote) == lines(anchor) and len(lines(anchor)) == 4
+    assert f"published {2 * ENTRIES_PER_TURN} new record" in publish(anchor, remote)
+    assert published_anchor(remote) == lines(anchor) and len(lines(anchor)) == 4 * ENTRIES_PER_TURN
     assert len(commits(remote)) == 2
 
 
@@ -106,7 +109,7 @@ def test_a_shortened_local_anchor_is_refused(system, remote):
 def test_publish_with_a_log_refuses_a_log_that_fails_its_anchor(system, remote):
     kernel, log, anchor, turns = system
     turns(3)
-    log.write_text("\n".join(lines(log)[:2]) + "\n")  # tail deleted
+    log.write_text("\n".join(lines(log)[:-1]) + "\n")  # only the very last entry (an outcome) deleted
     with pytest.raises(AnchorGitError, match="does not match its own anchor"):
         publish(anchor, remote, log=log)
     assert published_anchor(remote) is None  # nothing was published
@@ -123,7 +126,7 @@ def test_verify_passes_for_an_untouched_log(system, remote):
     kernel, log, anchor, turns = system
     turns(3)
     publish(anchor, remote)
-    assert "log verified: 3 receipts" in verify(log, remote)
+    assert f"log verified: {3 * ENTRIES_PER_TURN} receipts" in verify(log, remote)
 
 
 def test_the_published_copy_catches_a_log_and_anchor_that_were_both_edited(system, remote):
@@ -132,8 +135,8 @@ def test_the_published_copy_catches_a_log_and_anchor_that_were_both_edited(syste
     kernel, log, anchor, turns = system
     turns(3)
     publish(anchor, remote)
-    log.write_text("\n".join(lines(log)[:2]) + "\n")
-    anchor.write_text("\n".join(lines(anchor)[:2]) + "\n")
+    log.write_text("\n".join(lines(log)[:-1]) + "\n")  # drop just the last outcome...
+    anchor.write_text("\n".join(lines(anchor)[:-1]) + "\n")  # ...and the matching anchor record
     assert kernel.verify() is True  # the local check is fooled
     with pytest.raises(AnchorGitError, match="deleted"):
         verify(log, remote)
