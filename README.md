@@ -223,7 +223,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 187 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 195 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -308,6 +308,13 @@ python -m nova.cli deny <proposal_hash> --by alice --reason "not this"
    hash and starts over as pending. There is no undo command; a human removes the denial's line
    from the file. A denials file that exists but cannot be read counts as denying everything,
    and a lost or corrupted line would fail open, so keep the file where only the human can write.
+5. A request nobody decides expires after `NOVA_ICK_PENDING_TTL` seconds (default 604800, 7 days; a
+   missing, zero, negative or unparseable value means the default, never "forever"). An expired
+   request disappears from the lists and can no longer be approved or denied; nothing is deleted
+   from the file. If the same request is asked for again it comes back as a new pending one.
+   Approvals keep their own expiry and denials stay final. The operator screen needs the same
+   value (`--pending-ttl` or the same env var) or it will disagree with Nova about what is
+   expired; it shows how many requests expired undecided.
 
 Identical requests give identical hashes (the proposal is built from the request's
 content, hashed, never its text). An approval for one prompt does not cover another, and
@@ -362,12 +369,10 @@ keep the approvals file where the Nova server cannot write it. How the screen is
   uses, and a request must already be pending. It can write approval and denial records and nothing else.
 
 **Limits.** The token is the only login: anyone who can read your terminal output or your
-browser can approve or deny. There is no HTTPS (it never leaves the machine). Old pending
-requests that nobody decides stay listed until someone does. The page refreshes every few seconds.
+browser can approve or deny. There is no HTTPS (it never leaves the machine). The page refreshes every few seconds.
 Browser tests need Node with Playwright and Chromium and are skipped when those are missing.
 
 ## Planned
 
-1. A way to expire old pending requests nobody has decided.
-2. Run the signer as a separate process under another user, so the Nova process never holds the key.
-3. Strict JSON contracts for the proposal, policy and decision formats too.
+1. Run the signer as a separate process under another user, so the Nova process never holds the key.
+2. Strict JSON contracts for the proposal, policy and decision formats too.

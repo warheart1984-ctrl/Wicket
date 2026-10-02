@@ -39,6 +39,8 @@ try {
   await page.waitForSelector("#pending-body tr");
   results.pending_rows = await page.locator("#pending-body tr").count();
   results.target_text = await page.locator("#pending-body tr td:nth-child(2)").first().textContent();
+  results.expired_note = (await page.locator("#expired-note").isVisible())
+    ? await page.locator("#expired-note").textContent() : "";
   results.hostile_rendered_literally = results.target_text.includes(hostile);
   results.injected_elements = await page.locator("#pending-body img, #pending-body script").count();
   results.xss_ran = await page.evaluate(() => window.__xss === 1);

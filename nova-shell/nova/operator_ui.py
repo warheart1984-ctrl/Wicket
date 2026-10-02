@@ -40,8 +40,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from nova.ick import KernelRefusal, _find_binary
-from nova.ick_approvals import ApprovalStore
+from nova.ick import KernelRefusal, _find_binary, pending_ttl_from
+from nova.ick_approvals import DEFAULT_PENDING_TTL, ApprovalStore
 
 MAX_BODY = 4096
 MIN_EXPIRES, MAX_EXPIRES = 60, 24 * 3600
@@ -66,13 +66,14 @@ class OperatorConfig:
     # The file `python -m runtime.anchor_git watch|publish --status-file` writes. Another process
     # writes it, so everything read from it is treated as data, never trusted for its shape.
     publish_status: Path | None = None
+    pending_ttl: float = DEFAULT_PENDING_TTL  # must match Nova's NOVA_ICK_PENDING_TTL
     publish_stale_after: float = 900.0  # seconds without a successful publish before it is "stale"
 
 
 class OperatorApp:
     def __init__(self, config: OperatorConfig) -> None:
         self.config = config
-        self.store = ApprovalStore(config.approvals_file, config.state_dir)
+        self.store = ApprovalStore(config.approvals_file, config.state_dir, pending_ttl=config.pending_ttl)
 
     # --- reading ---------------------------------------------------------------------------
 
@@ -191,6 +192,8 @@ class OperatorApp:
             "anchor_publish": self._anchor_publishing(),
             "pending": [row for row in self.store.waiting() if row.get("proposal_hash") not in covered],
             "approved": active,
+            "expired_pending": self.store.expired_count(),
+            "pending_ttl": self.store.pending_ttl,
             "denied": sorted(self.store.denials(), key=lambda r: r.get("denied_at", 0), reverse=True)[:20],
             "can_check_published": bool(self.config.anchor_repo and self.config.log),
             "limits": {"min_expires": MIN_EXPIRES, "max_expires": MAX_EXPIRES, "max_uses": MAX_USES},
@@ -370,6 +373,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="status file written by `python -m runtime.anchor_git watch --status-file`")
     parser.add_argument("--anchor-stale-after", type=float, default=900.0,
                         help="seconds without a successful publish before the screen calls it stale (default 900)")
+    parser.add_argument("--pending-ttl", type=float, default=pending_ttl_from(env("NOVA_ICK_PENDING_TTL")),
+                        help="seconds an undecided request stays pending (default 604800 = 7 days; "
+                             "use the same value as Nova)")
     parser.add_argument("--nova-url", default=env("NOVA_URL", "http://127.0.0.1:8080"))
     parser.add_argument("--anchor-repo", default=env("NOVA_ANCHOR_REPO"), help="git repo holding the published anchor")
     parser.add_argument("--host", default="127.0.0.1")
@@ -388,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
         trusted_keys=Path(args.trusted_keys) if args.trusted_keys else None,
         require_signatures=args.require_signatures,
         publish_status=Path(args.anchor_status) if args.anchor_status else None,
-        publish_stale_after=args.anchor_stale_after,
+        publish_stale_after=args.anchor_stale_after, pending_ttl=args.pending_ttl,
     )
     try:
         server, token = make_server(config, host=args.host, port=args.port)
