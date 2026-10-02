@@ -204,12 +204,21 @@ class NodeSubmitRequest(BaseModel):
 app = FastAPI(title="Local Lawful Nova API", version="0.1.0")
 
 
+def _refusal_body(exc: KernelRefusal) -> dict[str, Any]:
+    error: dict[str, Any] = {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}
+    if exc.proposal_hash:
+        # What a human needs to approve this request. There is no HTTP route for approving.
+        error["proposal_hash"] = exc.proposal_hash
+        error["approve_with"] = f"python -m nova.cli approve {exc.proposal_hash}"
+    return {"error": error}
+
+
 @app.exception_handler(KernelRefusal)
 async def _kernel_refusal_handler(_: Request, exc: KernelRefusal) -> JSONResponse:
     """Any route whose action the kernel refuses returns 403, never an unhandled 500."""
     record_error()
     return JSONResponse(
-        {"error": {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}},
+        _refusal_body(exc),
         status_code=403,
     )
 app.state.nova_config = load_nova_config()
@@ -330,7 +339,7 @@ def openai_chat_completions(
     except KernelRefusal as exc:
         record_error()
         return JSONResponse(
-            {"error": {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}},
+            _refusal_body(exc),
             status_code=403,
         )
     except ProviderError as exc:
@@ -380,7 +389,7 @@ def openai_completions(
     except KernelRefusal as exc:
         record_error()
         return JSONResponse(
-            {"error": {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}},
+            _refusal_body(exc),
             status_code=403,
         )
     except ProviderError as exc:
@@ -410,7 +419,7 @@ def submit_node(
     except KernelRefusal as exc:
         record_error()
         return JSONResponse(
-            {"error": {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}},
+            _refusal_body(exc),
             status_code=403,
         )
     except NodeVeto as exc:
