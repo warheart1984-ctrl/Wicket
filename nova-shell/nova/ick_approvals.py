@@ -114,6 +114,23 @@ class ApprovalStore:
     def approvals(self) -> list[dict[str, Any]]:
         return _read_jsonl(self.approvals_file)
 
+    def active(self, *, now: float | None = None) -> list[dict[str, Any]]:
+        """Approvals that can still be used, each with how many uses are left."""
+        now = time.time() if now is None else now
+        used = _read_jsonl(self.used_file)
+        out: list[dict[str, Any]] = []
+        for entry in self.approvals():
+            try:
+                if float(entry["expires_at"]) <= now:
+                    continue
+                left = int(entry.get("uses", 1)) - sum(
+                    1 for row in used if row.get("approval_id") == entry.get("approval_id"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if left > 0:
+                out.append({**entry, "remaining": left})
+        return out
+
     def approve(self, proposal_hash: str, *, approved_by: str, expires_in: float = 3600,
                 uses: int = 1, now: float | None = None) -> dict[str, Any]:
         now = time.time() if now is None else now

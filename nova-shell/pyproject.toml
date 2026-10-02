@@ -26,3 +26,6 @@ nova-api = "nova.api:main"
 
 [tool.setuptools.packages.find]
 include = ["nova*"]
+
+[tool.setuptools.package-data]
+nova = ["operator_ui.html"]
