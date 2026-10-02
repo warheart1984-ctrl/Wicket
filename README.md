@@ -20,6 +20,12 @@ cargo clippy --tests -- -D warnings
 cargo test
 ```
 
+GitHub Actions (`.github/workflows/ci.yml`) runs these, the build and both Python suites on Linux and
+Windows for every push and pull request, plus the browser test for the operator screen on Linux. The
+Python suites skip kernel tests quietly when `infinityctl` has not been built, so the workflow checks that
+both packages can find it. The Windows job is new and unproven until it has run; some Unix-only code (file
+locking, key-file modes) is expected to behave differently there.
+
 ## Governed chat runtime
 
 `runtime/` is a small standard-library Python package. Each chat turn is turned into

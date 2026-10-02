@@ -27,6 +27,7 @@ from nova.errors import ProviderError
 from nova.ick_approvals import DEFAULT_PENDING_TTL, ApprovalStore
 
 _HERE = Path(__file__).resolve()
+_EXE = "infinityctl.exe" if os.name == "nt" else "infinityctl"  # what `cargo build` produces
 
 
 class KernelRefusal(ProviderError):
@@ -79,8 +80,8 @@ def delta_text(chunk: Any) -> str:
 def _find_binary(explicit: str | None) -> str:
     candidates = [explicit or ""]
     for parent in list(_HERE.parents)[:4]:
-        candidates += [str(parent / "target" / "release" / "infinityctl"),
-                       str(parent / "target" / "debug" / "infinityctl")]
+        candidates += [str(parent / "target" / "release" / _EXE),
+                       str(parent / "target" / "debug" / _EXE)]
     candidates.append(shutil.which("infinityctl") or "")
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
