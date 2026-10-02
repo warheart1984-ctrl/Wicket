@@ -40,6 +40,7 @@ try {
   results.hostile_rendered_literally = results.target_text.includes(hostile);
   results.injected_elements = await page.locator("#pending-body img, #pending-body script").count();
   results.xss_ran = await page.evaluate(() => window.__xss === 1);
+  results.injected_in_chips = await page.locator("#chips img, #chips script").count();
   results.hash_after_signin = await page.evaluate(() => location.hash);
   results.chips = await page.locator("#chips .chip").allTextContents();
 

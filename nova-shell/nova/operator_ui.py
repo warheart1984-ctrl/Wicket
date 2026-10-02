@@ -62,6 +62,10 @@ class OperatorConfig:
     # cannot change it, or a forger could simply add their own key.
     trusted_keys: Path | None = None
     require_signatures: bool = False
+    # The file `python -m runtime.anchor_git watch|publish --status-file` writes. Another process
+    # writes it, so everything read from it is treated as data, never trusted for its shape.
+    publish_status: Path | None = None
+    publish_stale_after: float = 900.0  # seconds without a successful publish before it is "stale"
 
 
 class OperatorApp:
@@ -140,12 +144,50 @@ class OperatorApp:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return done.returncode == 0, (done.stdout + done.stderr).strip()[:300]
 
+    @staticmethod
+    def _count(value: Any) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    def _anchor_publishing(self) -> dict[str, Any]:
+        """How fresh the copy of the anchor in the separate git repository is."""
+        config = self.config
+        if config.publish_status is None:
+            return {"monitored": False}
+        try:
+            raw = json.loads(config.publish_status.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = None
+        if not isinstance(raw, dict):
+            return {"monitored": True, "known": False}
+        last = raw.get("last_success_at")
+        last = last if isinstance(last, (int, float)) and not isinstance(last, bool) else None
+        age = None if last is None else max(0.0, time.time() - last)  # a clock in the future counts as just now
+        published = self._count(raw.get("published_records"))
+        local = None
+        if config.anchor is not None and config.anchor.exists():
+            local = sum(1 for line in config.anchor.read_text(encoding="utf-8", errors="replace").splitlines()
+                        if line.strip())
+        error = raw.get("last_error")
+        return {
+            "monitored": True,
+            "known": True,
+            "last_success_at": last,
+            "age_seconds": age,
+            "stale": age is None or age > config.publish_stale_after,
+            # entries written since the last publish: a rollback of these would go unnoticed
+            "unpublished_records": max(0, local - published) if local is not None and published is not None else None,
+            "consecutive_failures": self._count(raw.get("consecutive_failures")) or 0,
+            "last_error": error[:300] if isinstance(error, str) else None,
+            "integrity_failure": raw.get("integrity_failure") is True,
+        }
+
     def state(self) -> dict[str, Any]:
         active = self.store.active()
         covered = {row["proposal_hash"] for row in active}
         return {
             "nova": self._health(),
             "log": self._log(),
+            "anchor_publish": self._anchor_publishing(),
             "pending": [row for row in self.store.pending() if row.get("proposal_hash") not in covered],
             "approved": active,
             "can_check_published": bool(self.config.anchor_repo and self.config.log),
@@ -308,6 +350,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="public keys to check signatures against (keep it out of the log writer's reach)")
     parser.add_argument("--require-signatures", action="store_true",
                         help="every entry and anchor record must be signed (needs --trusted-keys)")
+    parser.add_argument("--anchor-status", default=env("NOVA_ANCHOR_STATUS"),
+                        help="status file written by `python -m runtime.anchor_git watch --status-file`")
+    parser.add_argument("--anchor-stale-after", type=float, default=900.0,
+                        help="seconds without a successful publish before the screen calls it stale (default 900)")
     parser.add_argument("--nova-url", default=env("NOVA_URL", "http://127.0.0.1:8080"))
     parser.add_argument("--anchor-repo", default=env("NOVA_ANCHOR_REPO"), help="git repo holding the published anchor")
     parser.add_argument("--host", default="127.0.0.1")
@@ -325,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
         nova_url=args.nova_url, anchor_repo=args.anchor_repo,
         trusted_keys=Path(args.trusted_keys) if args.trusted_keys else None,
         require_signatures=args.require_signatures,
+        publish_status=Path(args.anchor_status) if args.anchor_status else None,
+        publish_stale_after=args.anchor_stale_after,
     )
     try:
         server, token = make_server(config, host=args.host, port=args.port)

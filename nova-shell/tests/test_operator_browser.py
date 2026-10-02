@@ -44,7 +44,12 @@ def test_the_screen_works_in_a_real_browser_and_hostile_text_stays_inert(tmp_pat
     with pytest.raises(KernelRefusal):
         provider.chat_completion({"messages": [{"role": "user", "content": "hi"}]})
 
-    server, token = make_server(OperatorConfig(store.approvals_file, tmp_path / "state", log=log, anchor=anchor))
+    status = tmp_path / "publish-status.json"
+    status.write_text(json.dumps({
+        "last_success_at": int(__import__("time").time()) - 90, "published_records": 1,
+        "consecutive_failures": 2, "integrity_failure": False, "last_error": "push failed " + HOSTILE}))
+    server, token = make_server(OperatorConfig(store.approvals_file, tmp_path / "state", log=log, anchor=anchor,
+                                               publish_status=status))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     shots = Path(os.environ.get("OPERATOR_SHOTS", tmp_path / "shots"))
     shots.mkdir(parents=True, exist_ok=True)
@@ -70,6 +75,10 @@ def test_the_screen_works_in_a_real_browser_and_hostile_text_stays_inert(tmp_pat
     assert r["hash_after_signin"] == ""  # the token was removed from the address bar
     assert any("Receipt log verified" in chip for chip in r["chips"]), r["chips"]
     assert any("signatures: not checked" in chip for chip in r["chips"]), r["chips"]  # no keys configured here
+    failing = [chip for chip in r["chips"] if "anchor publishing failing (2 in a row)" in chip]
+    assert failing and HOSTILE in failing[0], r["chips"]  # shown as text, not interpreted
+    assert any("anchor published" in chip for chip in r["chips"]), r["chips"]
+    assert r["injected_in_chips"] == 0
     assert r["phone_horizontal_overflow"] is False
     assert len(r["dialogs"]) == 1 and "Approve this request?" in r["dialogs"][0]
     assert r["pending_hidden_after"] is True and r["approved_rows"] == 1
