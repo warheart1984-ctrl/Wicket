@@ -27,7 +27,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed
+python -m pytest        # offline tests, no keys needed (23 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -65,6 +65,30 @@ account, in an append-only store, or in a separate repository you commit to. The
 runtime cannot do this for you, so `--anchor` is opt-in and has no default location.
 An attacker who can edit both files can still erase history; the anchor raises the
 bar, it is not a proof.
+
+### Publishing the anchor to a separate git repository
+
+`runtime/anchor_git.py` puts the anchor where the log's writer cannot quietly rewrite it:
+
+```bash
+# on a schedule (cron, a timer): push the anchor, checking the log against it first
+python -m runtime.anchor_git publish --anchor A.jsonl --repo <git url> --log LOG
+
+# any time, from anywhere: check a log against the PUBLISHED anchor only
+python -m runtime.anchor_git verify --log LOG --repo <git url>
+```
+
+- `publish` never force-pushes. It refuses if the local anchor is not a pure continuation
+  of what is already published (so an edited, shortened or replaced anchor is caught), and
+  with `--log` it refuses if the log fails its own anchor. Each publish is one commit.
+- `verify` uses only the published copy. This is what catches the attack the local check
+  misses: delete the newest receipts **and** edit the local anchor to match.
+- Only a count and a receipt hash per record are published, never message text.
+
+**Limits.** It only helps if the repository is outside the log writer's control (another
+account, or a branch where force-pushes and deletions are blocked). Receipts added since the
+last `publish` are not covered until the next one. Authentication is whatever git already
+has. Tested against a local git repository, not against a hosted one yet.
 
 ## Nova shell
 
@@ -175,5 +199,5 @@ it is given, so it cannot tell a human from Nova. These rules come from Nova, no
 ## Planned
 
 1. Make `/v1/chat` work with the external provider (it only supports Ollama today).
-2. A helper that copies the latest anchor to an external place (a separate git repo).
+2. Publish the anchor automatically (on a timer, or every N turns) instead of by hand.
 3. A minimal operator surface.
