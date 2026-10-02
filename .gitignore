@@ -2,3 +2,6 @@
 /adapters/strands-ts/.build/
 /adapters/strands-ts/node_modules/
 /scripts/__pycache__/
+.runtime/
+__pycache__/
+.pytest_cache/
