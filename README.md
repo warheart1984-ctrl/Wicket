@@ -18,8 +18,24 @@ cargo clippy --tests -- -D warnings
 cargo test
 ```
 
+## Governed chat runtime
+
+`runtime/` is a small standard-library Python package. Each chat turn is turned into
+a proposal and sent to the kernel first. The model is called only if the kernel says
+`allow`; the receipt is appended to a log. Message text is never put in the proposal.
+
+```bash
+cargo build
+GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
+python -m pytest        # offline tests, no keys needed
+```
+
+Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
+`OPENROUTER_API_KEY`; models can be overridden with `INFINITY_<NAME>_MODEL`).
+All three were checked live. Reasoning models get a 256-token minimum and a
+no-thinking or low-reasoning setting so short replies are not left empty.
+
 ## Planned
 
-1. A small Python chat runtime with Groq, NVIDIA and OpenRouter providers.
-2. Every action the runtime wants to take goes through the kernel first.
-3. A minimal operator surface.
+1. Receipt chaining across turns (the CLI currently issues each receipt unlinked).
+2. A minimal operator surface.
