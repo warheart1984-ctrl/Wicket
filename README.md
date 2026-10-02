@@ -35,7 +35,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (152 pass)
+python -m pytest        # offline tests, no keys needed (169 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -136,6 +136,34 @@ infinityctl verify-log --log LOG --anchor A --trusted-keys signing.pub --require
 Typed contracts: `contracts/receipt.v2.json`, `contracts/outcome.v1.json` and `contracts/anchor.v1.json`
 (the latter two now allow the optional `key_id` and `signature`). The kernel gains one dependency,
 `ed25519-dalek`; the command-line tool gains `getrandom` for key generation.
+
+### Checking a log without trusting us: the standalone verifier
+
+```bash
+python verifier/ickverify.py receipts.jsonl --anchor anchor.jsonl --trusted-keys signing.pub --require-signatures
+```
+
+`verifier/ickverify.py` is one file with no dependencies beyond Python's standard library. It does not
+call `infinityctl`: it recomputes every hash and verifies every Ed25519 signature itself (with the same
+strictness as the kernel's `verify_strict`), so someone checking a log does not have to trust the Rust
+binary, Nova, or this repository's other code. Exit status is 0 verified, 1 not verified, 2 unreadable
+input; `--json` prints a report. It prints, every time, what a pass does and does not show, and notes
+anything it could not check (no anchor, no keys, unanchored newest entries, allows with no outcome).
+
+- **Tested against the Rust verifier**, not just by itself: real signed and anchored logs, about 40
+  kinds of deliberate damage under six combinations of anchor, keys and `--require-signatures`, correctly
+  hashed logs whose *meaning* is wrong (a second outcome for one allow, an outcome for a denial), random
+  single-character damage, awkward text such as `U+2028` in hashed fields, and the RFC 8032 test vector.
+  That testing found a real bug in the verifier on the way: it split lines with Python's `splitlines()`,
+  which also splits on `U+2028`, so a valid log containing that character was misread. It now splits on
+  newlines only, like the kernel. The verifier's checks were also broken one at a time to confirm a test
+  fails each time.
+- **It is a second implementation by the same author**, not an independent audit.
+- **It differs from the Rust checker in one deliberate way:** it refuses a public key whose encoding is
+  not canonical, which the Rust decoder would accept. It also warns about fields in an entry that the
+  hash does not cover; the kernel accepts those silently.
+- The anchor and the trusted keys must come from somewhere the log's writer cannot edit. The point of
+  `THREAT_MODEL.md` is the list of what a passing check still does not mean.
 
 ### Keeping the key out of Nova: the signer service
 
