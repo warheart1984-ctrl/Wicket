@@ -2,6 +2,7 @@ import http.client
 import json
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -29,7 +30,7 @@ class Fake:
 
 
 class Operator:
-    def __init__(self, tmp_path, nova_url=None):
+    def __init__(self, tmp_path, nova_url=None, **config_kwargs):
         self.dir = tmp_path
         self.policy = tmp_path / "policy.json"
         self.policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-approve-v1",
@@ -37,7 +38,7 @@ class Operator:
         self.log, self.anchor = tmp_path / "log" / "r.jsonl", tmp_path / "safe" / "a.jsonl"
         self.store = ApprovalStore(tmp_path / "human" / "approvals.jsonl", tmp_path / "state")
         self.config = OperatorConfig(self.store.approvals_file, tmp_path / "state", log=self.log,
-                                     anchor=self.anchor, nova_url=nova_url)
+                                     anchor=self.anchor, nova_url=nova_url, **config_kwargs)
         self.server, self.token = make_server(self.config)
         self.port = self.server.server_address[1]
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -300,3 +301,24 @@ def test_it_shows_outcomes_times_and_allows_that_have_none(tmp_path):
         assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", row["issued_at"]) for row in log["recent"])
     finally:
         operator.server.shutdown()
+
+
+def test_the_screen_counts_expired_requests_and_refuses_to_decide_them(tmp_path):
+    op = Operator(tmp_path, pending_ttl=3600)
+    op.store.record_pending(proposal_hash="old", summary={"action": "a"}, now=time.time() - 7200)
+    op.store.record_pending(proposal_hash="new", summary={"action": "b"})
+    s = state(op)
+    assert [r["proposal_hash"] for r in s["pending"]] == ["new"]
+    assert s["expired_pending"] == 1 and s["pending_ttl"] == 3600
+    assert op.call("POST", "/api/approve", {"proposal_hash": "old"})[0] == 404
+    assert op.call("POST", "/api/deny", {"proposal_hash": "old"})[0] == 404
+    assert not op.store.approvals_file.exists() and not op.store.denials_file.exists()
+    op.server.shutdown()
+
+
+def test_the_launcher_takes_the_ttl_and_rejects_nonsense(monkeypatch, tmp_path):
+    from nova.operator_ui import OperatorApp
+
+    with pytest.raises(ValueError):
+        OperatorApp(OperatorConfig(tmp_path / "a", tmp_path / "s", pending_ttl=0))
+    assert OperatorApp(OperatorConfig(tmp_path / "a", tmp_path / "s", pending_ttl=60)).store.pending_ttl == 60

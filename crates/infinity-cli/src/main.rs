@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 #[cfg(test)]
 use infinity_kernel::Decision;
 use infinity_kernel::{
-    evaluate, issue_outcome, issue_receipt, summarize, verify_log, verify_signatures, ApprovalSet,
-    LogEntry, Policy, Proposal, Signer, TrustedKeys,
+    evaluate, hash_value, issue_outcome, issue_receipt, summarize, verify_log, verify_signatures,
+    ApprovalSet, LogEntry, Policy, Proposal, Signer, TrustedKeys,
 };
 use std::{
     fs,
@@ -74,6 +74,12 @@ enum Command {
         /// Sign the outcome (and the anchor record) with this private key file.
         #[arg(long, env = "INFINITY_SIGN_KEY")]
         sign_key: Option<String>,
+    },
+    /// Print the hash a human approval is bound to: the proposal's hash with any `approval_id`
+    /// removed, which is what the first (waiting) evaluation of that request reports.
+    ProposalHash {
+        #[arg(long)]
+        proposal: String,
     },
     Replay {
         #[arg(long)]
@@ -498,6 +504,13 @@ fn run(command: Command) -> Result<(), String> {
                 }))
                 .expect("JSON")
             );
+            Ok(())
+        }
+        Command::ProposalHash { proposal } => {
+            let mut p: Proposal = read(&proposal)?;
+            p.approval_id = None;
+            let value = serde_json::to_value(&p).map_err(|e| e.to_string())?;
+            println!("{}", hash_value(&value).map_err(|e| e.to_string())?);
             Ok(())
         }
         Command::Replay { fixture } => {
@@ -1021,6 +1034,7 @@ mod tests {
         let _ = fs::remove_file(log);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_private_key_file_that_others_can_read_is_refused() {
         use std::os::unix::fs::PermissionsExt;
@@ -1036,13 +1050,16 @@ mod tests {
 
     #[test]
     fn new_key_files_are_private_and_never_overwritten() {
-        use std::os::unix::fs::PermissionsExt;
         let (private, public) = (temp_log("kg-priv"), temp_log("kg-pub"));
         create_new(&private, "secret", true).unwrap();
-        assert_eq!(
-            fs::metadata(&private).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         assert!(
             create_new(&private, "other", true).is_err(),
             "must not overwrite"

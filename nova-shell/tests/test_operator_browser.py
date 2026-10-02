@@ -46,12 +46,15 @@ def test_the_screen_works_in_a_real_browser_and_hostile_text_stays_inert(tmp_pat
     with pytest.raises(KernelRefusal):
         provider.chat_completion({"messages": [{"role": "user", "content": "a second request"}]})
 
+    store.pending_ttl = 3600
+    store.record_pending(proposal_hash="long-ago", summary={"action": "x", "target": "y"},
+                         now=__import__("time").time() - 7200)
     status = tmp_path / "publish-status.json"
     status.write_text(json.dumps({
         "last_success_at": int(__import__("time").time()) - 90, "published_records": 1,
         "consecutive_failures": 2, "integrity_failure": False, "last_error": "push failed " + HOSTILE}))
     server, token = make_server(OperatorConfig(store.approvals_file, tmp_path / "state", log=log, anchor=anchor,
-                                               publish_status=status))
+                                               publish_status=status, pending_ttl=3600))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     shots = Path(os.environ.get("OPERATOR_SHOTS", tmp_path / "shots"))
     shots.mkdir(parents=True, exist_ok=True)
@@ -71,7 +74,8 @@ def test_the_screen_works_in_a_real_browser_and_hostile_text_stays_inert(tmp_pat
     assert r["unauthorized"] == 1  # only the deliberate wrong-token probe
     assert r["login_shown"] and r["app_hidden_without_token"]
     assert "token" in r["wrong_token_message"].lower()
-    assert r["pending_rows"] == 2
+    assert r["pending_rows"] == 2  # the expired one is not listed
+    assert r["expired_note"].startswith("1 earlier request expired after 1 h")
     assert r["hostile_rendered_literally"] is True and HOSTILE in r["target_text"]
     assert r["injected_elements"] == 0 and r["xss_ran"] is False
     assert r["hash_after_signin"] == ""  # the token was removed from the address bar

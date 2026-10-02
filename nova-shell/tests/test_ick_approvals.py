@@ -368,3 +368,82 @@ def test_there_is_no_http_route_for_denying(api):
     assert not [p for p in (getattr(r, "path", "") for r in app.routes) if "deny" in p.lower() or "denial" in p.lower()]
     for path in ("/deny", "/v1/deny", "/node/deny"):
         assert api.post(path, json={"proposal_hash": "x"}).status_code in (404, 405)
+
+
+# --- expiry of undecided requests -------------------------------------------------------------
+
+DAY = 86400.0
+
+
+def test_an_undecided_request_expires_and_cannot_be_decided(tmp_path):
+    store = ApprovalStore(tmp_path / "h" / "approvals.jsonl", tmp_path / "state", pending_ttl=DAY)
+    store.record_pending(proposal_hash="h1", summary={"action": "a"}, now=1000)
+    assert [r["proposal_hash"] for r in store.pending(now=1000 + DAY)] == ["h1"]  # right at the limit
+    assert store.pending(now=1000 + DAY + 1) == [] and store.waiting(now=1000 + DAY + 1) == []
+    assert store.expired_count(now=1000 + DAY + 1) == 1 and store.expired_count(now=1000 + DAY) == 0
+    with pytest.raises(KeyError, match="expired"):
+        store.approve("h1", approved_by="alice", now=1000 + DAY + 1)
+    with pytest.raises(KeyError, match="expired"):
+        store.deny("h1", denied_by="alice", now=1000 + DAY + 1)
+    assert not store.approvals_file.exists() and not store.denials_file.exists()
+    assert len(store.pending_file.read_text().splitlines()) == 1  # nothing was rewritten
+
+
+def test_asking_again_after_expiry_makes_a_fresh_pending_request_once(tmp_path):
+    store = ApprovalStore(tmp_path / "h" / "approvals.jsonl", tmp_path / "state", pending_ttl=DAY)
+    store.record_pending(proposal_hash="h1", summary={}, now=1000)
+    store.record_pending(proposal_hash="h1", summary={}, now=1000 + 2 * DAY)
+    store.record_pending(proposal_hash="h1", summary={}, now=1000 + 2 * DAY + 5)  # already waiting
+    now = 1000 + 2 * DAY + 10
+    assert [r["requested_at"] for r in store.pending(now=now)] == [1000 + 2 * DAY]
+    assert store.expired_count(now=now) == 0
+    assert len(store.pending_file.read_text().splitlines()) == 2
+    store.approve("h1", approved_by="alice", now=now)  # and it can be decided again
+
+
+def test_a_request_with_a_bad_time_is_treated_as_expired(tmp_path):
+    store = ApprovalStore(tmp_path / "h" / "approvals.jsonl", tmp_path / "state")
+    store.pending_file.parent.mkdir(parents=True)
+    store.pending_file.write_text("\n".join(json.dumps(r) for r in (
+        {"proposal_hash": "a"}, {"proposal_hash": "b", "requested_at": "soon"},
+        {"proposal_hash": "c", "requested_at": None}, {"proposal_hash": "d", "requested_at": 5})) + "\n")
+    assert store.pending(now=10) == [{"proposal_hash": "d", "requested_at": 5}]
+
+
+def test_expiry_does_not_touch_an_approval_already_given_or_a_denial(tmp_path):
+    store = ApprovalStore(tmp_path / "h" / "approvals.jsonl", tmp_path / "state", pending_ttl=DAY)
+    store.record_pending(proposal_hash="ok", summary={}, now=1000)
+    store.record_pending(proposal_hash="no", summary={}, now=1000)
+    store.approve("ok", approved_by="alice", expires_in=10 * DAY, now=1000)
+    store.deny("no", denied_by="bob", now=1000)
+    later = 1000 + 3 * DAY
+    assert store.claim("ok", now=later) is not None  # the approval has its own, longer expiry
+    assert store.is_denied("no") and store.expired_count(now=later) == 0  # decided is not "expired"
+
+
+def test_the_ttl_must_be_positive_and_a_bad_setting_never_means_forever(tmp_path):
+    from nova.ick import approval_store_from_env, pending_ttl_from
+    from nova.ick_approvals import DEFAULT_PENDING_TTL
+
+    with pytest.raises(ValueError):
+        ApprovalStore(tmp_path / "a", tmp_path / "s", pending_ttl=0)
+    for bad in (None, "", "abc", "0", "-5", "inf", "nan"):
+        assert pending_ttl_from(bad) == DEFAULT_PENDING_TTL, bad
+    assert pending_ttl_from("3600") == 3600.0
+    store = approval_store_from_env({"NOVA_ICK_APPROVALS": str(tmp_path / "a"), "NOVA_ICK_PENDING_TTL": "60"})
+    assert store.pending_ttl == 60.0
+
+
+def test_the_gate_parks_an_expired_request_again_and_it_can_then_be_approved(policy, store, tmp_path):
+    store.pending_ttl = DAY
+    inner, provider = gated(policy, store)
+    h = refuse_and_get_hash(provider)
+    # make the first ask old
+    rows = [json.loads(l) for l in store.pending_file.read_text().splitlines()]
+    rows[0]["requested_at"] = int(time.time() - 3 * DAY)
+    store.pending_file.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert store.pending() == []
+    assert refuse_and_get_hash(provider) == h  # same request, same hash
+    assert [r["proposal_hash"] for r in store.pending()] == [h]
+    store.approve(h, approved_by="alice")
+    assert provider.chat_completion(request())["ick"]["approved_by"] == "alice"

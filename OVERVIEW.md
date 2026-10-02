@@ -29,10 +29,11 @@ every decision and outcome ──► receipt log, if one is configured (each ent
 
 | Piece | What it does | Lives in |
 |---|---|---|
+| **Signer service** (optional) | Runs the kernel, policy, key and log under another account; Nova asks over a Unix socket and holds none of them. | `runtime/ick_service.py` |
 | **ICK kernel** (Rust) | Judges a proposal: `allow`, `deny` or `await_human_approval`, and issues a hash-linked receipt, optionally signed with an Ed25519 key. Never calls a model. | `crates/`, `contracts/` |
 | **Receipt chain, outcomes, anchor** | Each entry includes the previous one's id, so editing one breaks the rest. After a model call an *outcome* entry is chained in, pointing at the `allow` that permitted it. The anchor records the log's length and head, which also catches deleted *newest* entries. | kernel CLI (`--log`, `--anchor`, `record-outcome`) |
 | **Nova shell** (Python) | The model-facing API (OpenAI-style) and CLI. Asks the kernel before every model call when `NOVA_ICK_POLICY` is set; fails closed if the kernel is missing. | `nova-shell/` |
-| **Human approvals** | A held request is parked with a hash; a person approves or denies that exact request (approval: expiry, use limit; denial: final). The kernel's answer is always final. | `nova-shell/nova/ick_approvals.py` |
+| **Human approvals** | A held request is parked with a hash; a person approves or denies that exact request (approval: expiry, use limit; denial: final); undecided requests expire after 7 days. The kernel's answer is always final. | `nova-shell/nova/ick_approvals.py` |
 | **Operator screen** | Pending requests with Approve and Deny buttons, log status, recent receipts. Localhost only, token-protected, strict CSP. | `nova-shell/nova/operator_ui.py` |
 | **Anchor publisher** | `publish` / `verify` against a separate git repo; never force-pushes. | `runtime/anchor_git.py` |
 | **Small chat runtime** | A minimal governed chat loop (Groq, NVIDIA, OpenRouter) used to prove the kernel end to end. | `runtime/` |
@@ -68,7 +69,7 @@ every decision and outcome ──► receipt log, if one is configured (each ent
 
 ```bash
 cargo build
-cd nova-shell && pip install -e . pytest PyYAML httpx && python -m pytest   # 193 pass, 4 skipped
+cd nova-shell && pip install -e . pytest PyYAML httpx && python -m pytest   # 209 pass, 4 skipped
 NOVA_ICK_POLICY=../demo/policy.json NOVA_PROVIDER=external \
 NOVA_EXTERNAL_URL=https://integrate.api.nvidia.com/v1 NOVA_EXTERNAL_API_KEY=... \
 NOVA_EXTERNAL_MODEL=nvidia/nemotron-3-super-120b-a12b python -m nova.api
@@ -77,14 +78,14 @@ Full instructions, settings and limits for each piece are in `README.md`.
 
 ## State of verification
 
-Tests: Rust 47, root Python 142, `nova-shell` 193 (+4 skipped). For the security-relevant rules, each
+Tests: Rust 47, root Python 152, `nova-shell` 209 (+4 skipped). For the security-relevant rules, each
 guard was removed in turn and a test failed. Run live against real Groq, NVIDIA and OpenRouter models:
 allow, deny, human approval, chained and anchored log, the operator screen in a real Chromium.
 
 **Not done / not verified:** publishing to a *hosted* git repo (tested with a local one); the
 local-model tool against a real Ollama or vLLM (tested with fakes); Windows file locking for the last use of an
 approval, and the key-file permission check (Unix only);
-old undecided requests are never expired; the anchor publisher can run on a schedule (`watch`) and the operator screen shows how stale it is, but nothing starts it for you, it must run as a different user than Nova with push credentials Nova lacks, and it is untested against a hosted git service; the signing key lives in a file on the writing machine (no separate signer process, no key store or
+the anchor publisher can run on a schedule (`watch`) and the operator screen shows how stale it is, but nothing starts it for you, it must run as a different user than Nova with push credentials Nova lacks, and it is untested against a hosted git service; the signing key can live in a separate signer service under another account (`runtime/ick_service.py`), but it is still a file (no key store or
 hardware key); no revocation or "valid until" for keys; all the JSON contracts are strict now, but they are only
 checked in tests (the kernel itself is more lenient than they are, by design). One full-suite failure was
 seen once and could not be reproduced in about 30 later runs (cause unknown).
