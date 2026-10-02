@@ -77,7 +77,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 55 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 67 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -93,11 +93,37 @@ Groq (`https://api.groq.com/openai/v1`, `openai/gpt-oss-120b`) works the same wa
 were checked live. One change was made to the imported code: a `User-Agent` header,
 because Groq rejects Python's default one.
 
-Nova's receipts and the ICK kernel's receipts are **separate systems** for now. Nova
-does not yet ask the kernel before it calls a model.
+### Nova asks the kernel first
+
+Set `NOVA_ICK_POLICY` to a policy file and Nova asks the ICK kernel before it calls a
+model; with it unset nothing changes. Optional: `NOVA_ICK_BIN`, `NOVA_ICK_LOG` (chained
+receipt log) and `NOVA_ICK_ANCHOR` (needs the log).
+
+```bash
+cargo build
+NOVA_ICK_POLICY=demo/policy.json NOVA_ICK_LOG=.runtime/receipts.jsonl \
+NOVA_PROVIDER=external NOVA_EXTERNAL_URL=https://integrate.api.nvidia.com/v1 \
+NOVA_EXTERNAL_API_KEY=... NOVA_EXTERNAL_MODEL=nvidia/nemotron-3-super-120b-a12b \
+python -m nova.api
+```
+
+- An `allow` verdict lets the call through, and the reply carries `nova.ick` with the
+  kernel's verdict and receipt id.
+- `deny` or `await_human_approval` stops the call before any model is contacted and
+  returns HTTP 403 with `KERNEL_DENIED` or `KERNEL_AWAITING_APPROVAL`.
+- It **fails closed**: a missing `infinityctl` or any kernel error also stops the call
+  (`KERNEL_UNAVAILABLE`). It never silently allows.
+- Only message counts and sizes go to the kernel, never the text.
+- Covered: `/v1/chat/completions` (including streaming), `/v1/completions`,
+  `/node/submit` and `/node/replay`, and the Ollama path used by `/v1/chat`.
+- **Not covered:** the node's local-model *tool* (`nova/node/tools/local_model.py`),
+  node federation calls, and `/v1/chat` with no provider set (it uses the built-in
+  stub, which contacts nothing). Calls to a model made outside Nova are not gated.
+- Nova keeps its own receipts too. The two systems now sit side by side, with the
+  kernel's receipt id included in Nova's reply. They are not merged into one log.
 
 ## Planned
 
-1. Make Nova ask the ICK kernel before it calls a model, so there is one set of receipts.
+1. Gate the remaining paths listed above, or decide they should stay open.
 2. A helper that copies the latest anchor to an external place (a separate git repo).
 3. A minimal operator surface.
