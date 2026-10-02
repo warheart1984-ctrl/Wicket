@@ -76,9 +76,20 @@ class IckGate:
             anchor=(env.get("NOVA_ICK_ANCHOR") or "").strip() or None,
         )
 
-    def check(self, *, target: str, governed_request: dict[str, Any]) -> dict[str, str]:
-        """Return {"verdict", "receipt_id"} if allowed; raise KernelRefusal otherwise."""
-        messages = governed_request.get("messages") or []
+    def check(
+        self,
+        *,
+        target: str,
+        governed_request: dict[str, Any] | None = None,
+        action: str = "chat_completion",
+        effect: str = "read",
+        risk: str = "low",
+    ) -> dict[str, str]:
+        """Return {"verdict", "receipt_id"} if allowed; raise KernelRefusal otherwise.
+
+        The default describes a model call. Other actions pass their own `action`/`effect`.
+        """
+        messages = (governed_request or {}).get("messages") or []
         try:
             policy_id = json.loads(self.policy.read_text())["policy_id"]
             binary = _find_binary(self.binary)
@@ -90,10 +101,10 @@ class IckGate:
             "version": "infinity.proposal.v1",
             "proposal_id": f"nova-{uuid.uuid4()}",
             "actor": {"kind": "agent", "id": "nova-shell"},
-            "action": "chat_completion",
+            "action": action,
             "target": target,
-            "effect": "read",
-            "risk": "low",
+            "effect": effect,
+            "risk": risk,
             "requires_human_approval": False,
             "policy_version": policy_id,
             # Sizes only; the message text itself never goes into a proposal.
@@ -165,6 +176,23 @@ class IckGatedProvider:
 
             return gated
         return attr
+
+
+def gate_action(
+    *,
+    target: str,
+    action: str,
+    effect: str,
+    governed_request: dict[str, Any] | None = None,
+    risk: str = "low",
+) -> dict[str, str] | None:
+    """Ask the kernel about one action. Returns None when the gate is off; raises KernelRefusal."""
+    gate = IckGate.from_env()
+    if gate is None:
+        return None
+    return gate.check(
+        target=target, governed_request=governed_request, action=action, effect=effect, risk=risk
+    )
 
 
 def gate_provider(provider: Any) -> Any:

@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from nova.ick import KernelRefusal, gate_action
 from nova.node.identity import NodeIdentity, sign_payload, verify_payload_signature
 from nova.node.ledger import append_ledger, runtime_dir
 from nova.node.policy import load_node_policy
@@ -56,6 +57,12 @@ def gossip_to_peers() -> list[dict[str, Any]]:
         endpoint = str(peer.get("endpoint") or "").rstrip("/")
         if not endpoint:
             results.append({"peer_id": peer_id, "status": "error", "error": "missing endpoint"})
+            continue
+        try:
+            # Gossip sends this node's identity and policy hash to another server.
+            gate_action(target=f"peer:{endpoint}", action="gossip_to_peer", effect="write")
+        except KernelRefusal as exc:
+            results.append({"peer_id": peer_id, "status": "refused", "error": exc.code})
             continue
         request = urllib.request.Request(
             f"{endpoint}/node/gossip",

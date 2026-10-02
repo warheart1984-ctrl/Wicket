@@ -12,7 +12,7 @@ import asyncio
 import urllib.error
 import urllib.request
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -202,6 +202,16 @@ class NodeSubmitRequest(BaseModel):
 
 
 app = FastAPI(title="Local Lawful Nova API", version="0.1.0")
+
+
+@app.exception_handler(KernelRefusal)
+async def _kernel_refusal_handler(_: Request, exc: KernelRefusal) -> JSONResponse:
+    """Any route whose action the kernel refuses returns 403, never an unhandled 500."""
+    record_error()
+    return JSONResponse(
+        {"error": {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}},
+        status_code=403,
+    )
 app.state.nova_config = load_nova_config()
 
 
