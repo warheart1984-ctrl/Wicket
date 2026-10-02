@@ -81,11 +81,11 @@ jobs:
           cd nova-shell && python -c "from nova.ick import _find_binary; print(_find_binary(None))"
 
       - name: Python tests (repository root)
-        run: python -m pytest tests -q -rs
+        run: python -m pytest tests -q -rsf
 
       - name: Python tests (nova-shell)
         working-directory: nova-shell
-        run: python -m pytest tests -q -rs
+        run: python -m pytest tests -q -rsf
         env:
           PYTHONPATH: .
 

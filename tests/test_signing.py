@@ -165,6 +165,7 @@ def test_an_unsigned_writer_cannot_extend_a_signed_log(signed):
     assert signed["checker"].verify() is True
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Unix file modes; the key-file check is a no-op elsewhere (see README)")
 def test_a_key_file_other_users_can_read_is_refused_before_any_model_call(signed):
     os.chmod(signed["private"], 0o644)
     client = FakeClient()
@@ -188,7 +189,8 @@ def test_keygen_will_not_overwrite_an_existing_key(tmp_path):
     again = subprocess.run([BINARY, "keygen", "--out", str(private), "--public-out", str(tmp_path / "x.pub")],
                            capture_output=True, text=True)
     assert again.returncode != 0 and private.read_text() == before and not (tmp_path / "x.pub").exists()
-    assert oct(os.stat(private).st_mode & 0o777) == "0o600"
+    if os.name == "posix":  # Windows has no Unix file modes
+        assert oct(os.stat(private).st_mode & 0o777) == "0o600"
 
 
 def test_a_log_can_move_to_a_new_key_and_both_are_trusted(signed):

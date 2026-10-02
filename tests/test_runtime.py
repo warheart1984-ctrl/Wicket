@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -163,6 +164,7 @@ def test_a_failing_provider_is_recorded_as_failed_and_the_error_survives(tmp_pat
     assert entries_of(log)[1]["status"] == "failed" and entries_of(log)[1]["response_sha256"] is None
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the stand-in binary is a #! script, which Windows cannot run")
 def test_if_the_outcome_cannot_be_recorded_the_reply_is_withheld(tmp_path):
     import sys
 
