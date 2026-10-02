@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from nova.audit import audit_event
 from nova.config import load_nova_config
 from nova.errors import ProviderError
+from nova.ick import KernelRefusal, gate_provider
 from nova.lawful_llm import LawfulLLM
 from nova.metrics import metrics, record_error, record_request
 from nova.node import NodeVeto, load_node_result, node_status, submit_node_task
@@ -316,6 +317,12 @@ def openai_chat_completions(
             "completion_id": completion["id"],
         })
         return completion
+    except KernelRefusal as exc:
+        record_error()
+        return JSONResponse(
+            {"error": {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}},
+            status_code=403,
+        )
     except ProviderError as exc:
         record_error()
         return JSONResponse(
@@ -360,6 +367,12 @@ def openai_completions(
                 }
             ],
         }
+    except KernelRefusal as exc:
+        record_error()
+        return JSONResponse(
+            {"error": {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}},
+            status_code=403,
+        )
     except ProviderError as exc:
         record_error()
         return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=500)
@@ -384,6 +397,12 @@ def submit_node(
     provider = build_provider(cfg)
     try:
         return submit_node_task(request.model_dump(), provider)
+    except KernelRefusal as exc:
+        record_error()
+        return JSONResponse(
+            {"error": {"code": exc.code, "message": exc.message, "kernel_receipt": exc.receipt_id}},
+            status_code=403,
+        )
     except NodeVeto as exc:
         return JSONResponse(
             {
@@ -452,9 +471,11 @@ def _build_provider() -> Any | None:
         return None
     if provider != "ollama":
         raise RuntimeError(f"unsupported NOVA_PROVIDER: {provider}")
-    return OllamaChatProvider(
-        base_url=os.environ.get("NOVA_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-        model=os.environ.get("NOVA_OLLAMA_MODEL", "qwen2.5-coder:3b"),
+    return gate_provider(
+        OllamaChatProvider(
+            base_url=os.environ.get("NOVA_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+            model=os.environ.get("NOVA_OLLAMA_MODEL", "qwen2.5-coder:3b"),
+        )
     )
 
 
@@ -475,6 +496,7 @@ def _provider_completion_payload(result: dict[str, Any]) -> dict[str, Any]:
     receipt = result.get("receipt")
     completion["nova"] = {
         "decision": "EXECUTED",
+        "ick": result.get("ick"),
         "receipt": receipt,
         "chain": {},
         "receipt_verified": True,

@@ -9,6 +9,12 @@ from .provider_ollama import OllamaProvider
 
 
 def build_provider(config: dict[str, Any]) -> NovaProvider:
+    from nova.ick import gate_provider  # opt-in kernel gate; no-op unless NOVA_ICK_POLICY is set
+
+    return gate_provider(_build_provider(config))
+
+
+def _build_provider(config: dict[str, Any]) -> NovaProvider:
     provider_name = str(config.get("provider") or "local").lower()
     timeout = float(config.get("timeout") or 60)
     if provider_name == "ollama":
