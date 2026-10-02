@@ -56,9 +56,19 @@ class Kernel:
         receipt_log: Path | None = None,
         binary: str | None = None,
         anchor: Path | None = None,
+        sign_key: Path | None = None,
+        trusted_keys: Path | None = None,
+        require_signatures: bool = False,
     ) -> None:
         if anchor and not receipt_log:
             raise KernelError("an anchor needs a receipt log")
+        if require_signatures and not trusted_keys:
+            raise KernelError("require_signatures needs trusted_keys")
+        # sign_key: private key file used to sign what is written (must be mode 0600).
+        # trusted_keys: public keys `verify()` trusts. Keep that file where the log's writer cannot edit it.
+        self.sign_key = Path(sign_key) if sign_key else None
+        self.trusted_keys = Path(trusted_keys) if trusted_keys else None
+        self.require_signatures = require_signatures
         self.policy = Path(policy)
         self.receipt_log = Path(receipt_log) if receipt_log else None
         # Keep the anchor where whoever can edit the receipt log cannot also edit it.
@@ -70,6 +80,8 @@ class Kernel:
             path = Path(tmp) / "proposal.json"
             path.write_text(json.dumps(proposal))
             cmd = [self.binary, "evaluate", "--proposal", str(path), "--policy", str(self.policy)]
+            if self.sign_key:
+                cmd += ["--sign-key", str(self.sign_key)]
             if self.receipt_log:
                 self.receipt_log.parent.mkdir(parents=True, exist_ok=True)
                 cmd += ["--log", str(self.receipt_log)]  # the CLI chains and appends the receipt
@@ -99,6 +111,8 @@ class Kernel:
             return None
         cmd = [self.binary, "record-outcome", "--log", str(self.receipt_log),
                "--decision-receipt", decision_receipt_id, "--status", status]
+        if self.sign_key:
+            cmd += ["--sign-key", str(self.sign_key)]
         if self.anchor:
             cmd += ["--anchor", str(self.anchor)]
         if request_sha256:
@@ -117,4 +131,8 @@ class Kernel:
         cmd = [self.binary, "verify-log", "--log", str(self.receipt_log)]
         if self.anchor:
             cmd += ["--anchor", str(self.anchor)]
+        if self.trusted_keys:
+            cmd += ["--trusted-keys", str(self.trusted_keys)]
+            if self.require_signatures:
+                cmd += ["--require-signatures"]
         return subprocess.run(cmd, capture_output=True, text=True, timeout=30).returncode == 0

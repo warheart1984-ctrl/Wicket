@@ -58,6 +58,10 @@ class OperatorConfig:
     anchor: Path | None = None
     nova_url: str | None = None
     anchor_repo: str | None = None
+    # Public keys the log's signatures are checked against. Keep this file where the log's writer
+    # cannot change it, or a forger could simply add their own key.
+    trusted_keys: Path | None = None
+    require_signatures: bool = False
 
 
 class OperatorApp:
@@ -88,7 +92,9 @@ class OperatorApp:
                 continue
             if isinstance(row, dict):
                 receipts.append(row)
-        verified, message = self._verify(log, self.config.anchor)
+        verified, message = self._verify(log, self.config.anchor, self.config.trusted_keys,
+                                         self.config.require_signatures)
+        checked = self.config.trusted_keys is not None
         outcomes = [r for r in receipts if "decision_receipt_id" in r]
         answered = {r["decision_receipt_id"] for r in outcomes}
         allows = [r for r in receipts if r.get("verdict") == "allow"]
@@ -101,6 +107,13 @@ class OperatorApp:
             "verified": verified,
             "message": message,
             "anchored": self.config.anchor is not None,
+            "signatures": {
+                "checked": checked,
+                "required": self.config.require_signatures,
+                # true only if signatures were checked and at least one entry carried one; a log with
+                # no signatures at all passes the hash check but proves nothing about who wrote it
+                "authenticated": bool(checked and verified and "NOT checked" not in message),
+            },
             "recent": [
                 {"n": index + 1, "receipt_id": r.get("receipt_id"),
                  "verdict": r.get("verdict") or f"outcome: {r.get('status')}",
@@ -111,7 +124,8 @@ class OperatorApp:
         }
 
     @staticmethod
-    def _verify(log: Path, anchor: Path | None) -> tuple[bool, str]:
+    def _verify(log: Path, anchor: Path | None, trusted_keys: Path | None = None,
+                require_signatures: bool = False) -> tuple[bool, str]:
         try:
             binary = _find_binary(None)
         except KernelRefusal as exc:
@@ -119,6 +133,10 @@ class OperatorApp:
         cmd = [binary, "verify-log", "--log", str(log)]
         if anchor is not None:
             cmd += ["--anchor", str(anchor)]
+        if trusted_keys is not None:
+            cmd += ["--trusted-keys", str(trusted_keys)]
+            if require_signatures:
+                cmd += ["--require-signatures"]
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return done.returncode == 0, (done.stdout + done.stderr).strip()[:300]
 
@@ -286,6 +304,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state", default=env("NOVA_ICK_STATE") or ".runtime/ick-state")
     parser.add_argument("--log", default=env("NOVA_ICK_LOG"), help="kernel receipt log")
     parser.add_argument("--anchor", default=env("NOVA_ICK_ANCHOR"))
+    parser.add_argument("--trusted-keys", default=env("NOVA_ICK_TRUSTED_KEYS"),
+                        help="public keys to check signatures against (keep it out of the log writer's reach)")
+    parser.add_argument("--require-signatures", action="store_true",
+                        help="every entry and anchor record must be signed (needs --trusted-keys)")
     parser.add_argument("--nova-url", default=env("NOVA_URL", "http://127.0.0.1:8080"))
     parser.add_argument("--anchor-repo", default=env("NOVA_ANCHOR_REPO"), help="git repo holding the published anchor")
     parser.add_argument("--host", default="127.0.0.1")
@@ -294,10 +316,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.approvals:
         print("set --approvals (or NOVA_ICK_APPROVALS): that is where approvals are written", file=sys.stderr)
         return 2
+    if args.require_signatures and not args.trusted_keys:
+        print("--require-signatures needs --trusted-keys", file=sys.stderr)
+        return 2
     config = OperatorConfig(
         approvals_file=Path(args.approvals), state_dir=Path(args.state),
         log=Path(args.log) if args.log else None, anchor=Path(args.anchor) if args.anchor else None,
         nova_url=args.nova_url, anchor_repo=args.anchor_repo,
+        trusted_keys=Path(args.trusted_keys) if args.trusted_keys else None,
+        require_signatures=args.require_signatures,
     )
     try:
         server, token = make_server(config, host=args.host, port=args.port)

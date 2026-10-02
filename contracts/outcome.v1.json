@@ -4,15 +4,67 @@
   "description": "What happened after an allow, in the same chain as the decision receipts. Holds hashes only, never the request or reply. Valid only if decision_receipt_id names an earlier allow that has no other outcome.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "receipt_id", "previous_receipt_hash", "decision_receipt_id", "status", "request_sha256", "response_sha256", "issued_at"],
+  "required": [
+    "version",
+    "receipt_id",
+    "previous_receipt_hash",
+    "decision_receipt_id",
+    "status",
+    "request_sha256",
+    "response_sha256",
+    "issued_at"
+  ],
   "properties": {
-    "version": { "const": "infinity.outcome.v1" },
-    "receipt_id": { "type": "string", "pattern": "^receipt:sha3-256:[0-9a-f]{64}$" },
-    "previous_receipt_hash": { "type": ["string", "null"], "pattern": "^receipt:sha3-256:[0-9a-f]{64}$" },
-    "decision_receipt_id": { "type": "string", "pattern": "^receipt:sha3-256:[0-9a-f]{64}$" },
-    "status": { "enum": ["completed", "failed"] },
-    "request_sha256": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
-    "response_sha256": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
-    "issued_at": { "type": "string" }
+    "version": {
+      "const": "infinity.outcome.v1"
+    },
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^receipt:sha3-256:[0-9a-f]{64}$"
+    },
+    "previous_receipt_hash": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^receipt:sha3-256:[0-9a-f]{64}$"
+    },
+    "decision_receipt_id": {
+      "type": "string",
+      "pattern": "^receipt:sha3-256:[0-9a-f]{64}$"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "failed"
+      ]
+    },
+    "request_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "response_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "issued_at": {
+      "type": "string"
+    },
+    "key_id": {
+      "type": "string",
+      "pattern": "^key:sha3-256:[0-9a-f]{64}$",
+      "description": "Present only on signed entries; names the public key to check the signature with."
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^ed25519:[0-9a-f]{128}$",
+      "description": "Ed25519 over the entry id with a domain prefix. Not part of the hash. Needs a trusted public key to mean anything."
+    }
   }
 }

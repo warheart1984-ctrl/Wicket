@@ -96,10 +96,13 @@ class IckGate:
         log: str | Path | None = None,
         anchor: str | Path | None = None,
         approvals: ApprovalStore | None = None,
+        sign_key: str | Path | None = None,
     ) -> None:
         if anchor and not log:
             raise ValueError("NOVA_ICK_ANCHOR needs NOVA_ICK_LOG")
         self.approvals = approvals
+        # Private key file (mode 0600) used to sign every receipt, outcome and anchor record written.
+        self.sign_key = Path(sign_key) if sign_key else None
         self.policy = Path(policy)
         self.binary = binary
         self.log = Path(log) if log else None
@@ -117,6 +120,7 @@ class IckGate:
             log=(env.get("NOVA_ICK_LOG") or "").strip() or None,
             anchor=(env.get("NOVA_ICK_ANCHOR") or "").strip() or None,
             approvals=approval_store_from_env(env),
+            sign_key=(env.get("NOVA_ICK_SIGN_KEY") or "").strip() or None,
         )
 
     def _run(self, proposal: dict[str, Any], approval_ids: list[str]) -> dict[str, Any]:
@@ -129,6 +133,8 @@ class IckGate:
             path = Path(tmp) / "proposal.json"
             path.write_text(json.dumps(proposal))
             cmd = [binary, "evaluate", "--proposal", str(path), "--policy", str(self.policy)]
+            if self.sign_key:
+                cmd += ["--sign-key", str(self.sign_key)]
             for approval_id in approval_ids:
                 cmd += ["--approval", approval_id]
             if self.log:
@@ -161,6 +167,8 @@ class IckGate:
             raise OutcomeNotRecorded(exc.message) from exc
         cmd = [binary, "record-outcome", "--log", str(self.log), "--decision-receipt", ick["receipt_id"],
                "--status", status]
+        if self.sign_key:
+            cmd += ["--sign-key", str(self.sign_key)]
         if self.anchor:
             cmd += ["--anchor", str(self.anchor)]
         if ick.get("request_sha256"):

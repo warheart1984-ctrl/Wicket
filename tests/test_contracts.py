@@ -77,3 +77,42 @@ def test_the_contracts_reject_unknown_and_missing_fields(log_entries):
     del receipt["issued_at"]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, schema("receipt.v2.json"))
+
+
+# --- signed entries and anchor records ---------------------------------------------------------
+
+import subprocess  # noqa: E402
+
+
+def test_signed_entries_and_anchor_records_match_their_contracts(tmp_path, monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    binary = find_binary()
+    private, public = tmp_path / "k.priv", tmp_path / "k.pub"
+    subprocess.run([binary, "keygen", "--out", str(private), "--public-out", str(public)], check=True,
+                   capture_output=True)
+    log, anchor = tmp_path / "r.jsonl", tmp_path / "a.jsonl"
+    run_turn("hi", "groq", Kernel(receipt_log=log, anchor=anchor, sign_key=private), client=FakeClient())
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    anchors = [json.loads(line) for line in anchor.read_text().splitlines()]
+    assert len(entries) == 2 and len(anchors) == 2
+    for entry in entries:
+        assert "signature" in entry and "key_id" in entry
+        jsonschema.validate(entry, schema("receipt.v2.json" if "verdict" in entry else "outcome.v1.json"))
+    for record in anchors:
+        assert "signature" in record
+        jsonschema.validate(record, schema("anchor.v1.json"))
+
+
+@pytest.mark.parametrize("name, field, bad", [
+    ("receipt.v2.json", "signature", "ed25519:short"),
+    ("receipt.v2.json", "signature", "rsa:" + "0" * 128),
+    ("receipt.v2.json", "key_id", "key:md5:abc"),
+    ("anchor.v1.json", "head_receipt_id", "not-a-receipt"),
+    ("anchor.v1.json", "count", 0),
+])
+def test_the_signature_and_anchor_contracts_reject_bad_values(log_entries, name, field, bad):
+    base = ({"version": "infinity.anchor.v1", "count": 1, "head_receipt_id": log_entries[0]["receipt_id"]}
+            if name.startswith("anchor") else copy.deepcopy(log_entries[0]))
+    base[field] = bad
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(base, schema(name))

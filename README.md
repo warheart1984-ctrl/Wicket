@@ -29,7 +29,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (40 pass)
+python -m pytest        # offline tests, no keys needed (63 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -70,6 +70,48 @@ also reports `N allowed without an outcome`: calls still running, never finished
 not be written. The Nova gate and the small runtime record an outcome after every call; if it cannot be
 written the reply is withheld (for a stream, whose text is already out, the gap is reported instead).
 The typed contracts are `contracts/receipt.v2.json` and `contracts/outcome.v1.json`.
+
+### Signed receipts
+
+Receipts, outcomes **and anchor records** can carry an Ed25519 signature, so forging or editing
+history needs a secret key and not just write access to the files.
+
+```bash
+infinityctl keygen --out signing.priv --public-out signing.pub   # private key created 0600; never overwrites
+infinityctl evaluate ... --log LOG --anchor A --sign-key signing.priv   # or set INFINITY_SIGN_KEY / NOVA_ICK_SIGN_KEY
+infinityctl verify-log --log LOG --anchor A --trusted-keys signing.pub --require-signatures
+```
+
+- **What is signed.** The entry's id (a hash of every other field, including the time), behind a prefix
+  that names the purpose, so a signature for an entry cannot be reused for an anchor record or the
+  reverse. Signatures are optional: unsigned entries and old logs verify exactly as before.
+- **Checking.** `--trusted-keys` is a file of `ed25519-public:<hex>` lines (blank lines and `#` comments
+  allowed). Keep it where the log's writer cannot change it: a key found inside the log proves nothing.
+  Without `--trusted-keys`, signatures are not looked at; with it but without `--require-signatures`, a log
+  that carries no signatures at all passes and says so ("authenticity is NOT checked"). Use
+  `--require-signatures` once signing is on, otherwise someone who strips every signature goes unnoticed.
+  Once an entry is signed, every later one must be, so stripping only the newest signatures is always caught.
+- **Key hygiene.** The tool refuses a private key file that other users can read (`chmod 600`), refuses to
+  overwrite on `keygen`, never prints the private key, and will not append an unsigned entry to a signed
+  log. A log can move to a new key: list both public keys in the trusted-keys file.
+- **The operator screen** shows `signatures verified`, `NOT AUTHENTICATED: no signatures` or
+  `signatures: not checked`, and takes `--trusted-keys` / `--require-signatures`. The anchor publisher takes
+  the same two options.
+
+**What signing does not do.**
+- It does **not** stop a rollback: removing the newest entries *and* their anchor records leaves an earlier
+  state in which every signature is genuine. Catching that needs the copy of the newest anchor that was
+  published to the separate git repository, which is why the two are meant to be used together (a test shows
+  the local check passing and the published check failing).
+- The private key is a file on the machine that writes the log. Anyone who can read it, which includes the
+  Nova process and its user, can sign forgeries. Signing protects against tampering with *stored* files
+  (backups, other accounts, a copied repository), not against a compromised writer. Running the signer as a
+  separate process under another user is not built yet.
+- Signatures prove who wrote an entry, not that the clock was right.
+
+Typed contracts: `contracts/receipt.v2.json`, `contracts/outcome.v1.json` and `contracts/anchor.v1.json`
+(the latter two now allow the optional `key_id` and `signature`). The kernel gains one dependency,
+`ed25519-dalek`; the command-line tool gains `getrandom` for key generation.
 
 ## Log anchor
 
@@ -126,7 +168,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 149 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 159 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -265,5 +307,5 @@ Browser tests need Node with Playwright and Chromium and are skipped when those 
 
 1. Publish the anchor automatically (on a timer, or every N turns) instead of by hand.
 2. A "deny" action on the operator screen, and a way to close or expire old pending requests.
-3. Sign receipts with a key, so forging history needs more than write access to the log.
+3. Run the signer as a separate process under another user, so the Nova process never holds the key.
 4. Strict JSON contracts for the proposal, policy and decision formats too.
