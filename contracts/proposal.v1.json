@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Infinity Proposal v1","type":"object","required":["version","proposal_id","actor","action","target","effect","risk","requires_human_approval","policy_version","payload","evidence_refs"]}

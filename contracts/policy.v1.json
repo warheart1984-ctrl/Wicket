@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Infinity Policy v1","type":"object","required":["version","policy_id"]}
