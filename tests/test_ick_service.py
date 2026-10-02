@@ -11,9 +11,6 @@ from pathlib import Path
 
 import pytest
 
-if os.name != "posix":
-    pytest.skip("the signer service speaks over Unix domain sockets", allow_module_level=True)
-
 from runtime.ick_service import Service, make_server
 from runtime.kernel import Kernel, KernelError, find_binary
 
