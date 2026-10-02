@@ -101,7 +101,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 97 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 107 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -150,7 +150,11 @@ python -m nova.api
 - Gossip is a `write`, and the demo policy requires approval for writes, so with
   `demo/policy.json` gossip waits until a human approves it (see below), or until you use
   a policy with `effects_requiring_approval: []`.
-- Not gated, on purpose: `/v1/chat` with no provider set. It uses the built-in stub,
+- `/v1/chat` (Nova's "lawful brain" route) works with `NOVA_PROVIDER=external` as well as
+  `ollama`, and takes its settings from the same place as the other routes, including
+  the `NOVA_CONFIG` file. It used to answer 500 for anything but Ollama. Failures from
+  the model come back as a JSON error, not a bare 500. It is gated once per call.
+- Not gated, on purpose: `/v1/chat` with no provider set (or `NOVA_PROVIDER=local`). It uses the built-in stub,
   which contacts nothing (a test proves that, with the network blocked).
 - Not checked: nothing in `nova/` runs shell commands or opens raw sockets, but a model
   called from outside Nova is not gated. The local-model tool was checked with fakes, not
@@ -198,6 +202,5 @@ it is given, so it cannot tell a human from Nova. These rules come from Nova, no
 
 ## Planned
 
-1. Make `/v1/chat` work with the external provider (it only supports Ollama today).
-2. Publish the anchor automatically (on a timer, or every N turns) instead of by hand.
-3. A minimal operator surface.
+1. Publish the anchor automatically (on a timer, or every N turns) instead of by hand.
+2. A minimal operator surface.

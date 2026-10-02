@@ -252,12 +252,18 @@ def health() -> dict[str, str]:
 
 
 @app.post("/v1/chat")
-def chat(request: ChatRequest) -> dict[str, Any]:
-    return _run_lawful_chat(
-        prompt=request.prompt,
-        tenant_id=request.tenant_id,
-        capability=request.capability,
-    )
+def chat(request: ChatRequest) -> Any:
+    try:
+        return _run_lawful_chat(
+            prompt=request.prompt,
+            tenant_id=request.tenant_id,
+            capability=request.capability,
+        )
+    except KernelRefusal:
+        raise  # the app-wide handler turns this into a 403
+    except ProviderError as exc:
+        record_error()
+        return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=500)
 
 
 def _require_api_key(
@@ -484,12 +490,54 @@ def _run_lawful_chat(*, prompt: str, tenant_id: str, capability: str) -> dict[st
     }
 
 
+class _InvokeAdapter:
+    """Lets a `chat_completion` provider (the registry's external one) serve `/v1/chat`.
+
+    The lawful brain behind `/v1/chat` calls `await provider.invoke(messages, ...)`, while the
+    registry providers answer `chat_completion(governed_request)`. The wrapped provider is
+    already behind the kernel gate, so this adapter adds no second check.
+    """
+
+    def __init__(self, provider: Any) -> None:
+        self._provider = provider
+        self.provider_id = str(getattr(provider, "provider_id", None) or "external")
+        self.model = getattr(provider, "model", None)
+
+    async def invoke(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> ProviderResponse:
+        request = {"messages": list(messages), "max_tokens": max_tokens, "temperature": temperature}
+        result = await asyncio.to_thread(self._provider.chat_completion, request)
+        completion = result["completion"]
+        choices = completion.get("choices") or []
+        text = str(((choices[0] if choices else {}).get("message") or {}).get("content") or "")
+        if not text:
+            raise ProviderError(code="PROVIDER_EMPTY_RESPONSE", message=f"{self.provider_id} returned no text")
+        usage = completion.get("usage") or {}
+        return ProviderResponse(
+            content=text,
+            provider=self.provider_id,
+            model=str(completion.get("model") or model or self.model or ""),
+            input_tokens=int(usage.get("prompt_tokens") or 0),
+            output_tokens=int(usage.get("completion_tokens") or 0),
+        )
+
+
 def _build_provider() -> Any | None:
-    provider = os.environ.get("NOVA_PROVIDER", "").strip().lower()
-    if not provider:
+    """The provider behind `/v1/chat`: None means the built-in stub, which contacts nothing."""
+    cfg = load_nova_config()
+    provider = str(cfg.get("provider") or "").strip().lower()
+    if provider in ("", "local"):
         return None
+    if provider == "external":
+        return _InvokeAdapter(_registry_build_provider(cfg))
     if provider != "ollama":
-        raise RuntimeError(f"unsupported NOVA_PROVIDER: {provider}")
+        raise ProviderError(code="PROVIDER_UNSUPPORTED", message=f"unsupported NOVA_PROVIDER: {provider}")
     return gate_provider(
         OllamaChatProvider(
             base_url=os.environ.get("NOVA_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
