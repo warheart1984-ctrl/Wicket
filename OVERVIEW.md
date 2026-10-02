@@ -30,6 +30,7 @@ every decision and outcome ──► receipt log, if one is configured (each ent
 | Piece | What it does | Lives in |
 |---|---|---|
 | **Signer service** (optional) | Runs the kernel, policy, key and log under another account; Nova asks over a Unix socket and holds none of them. | `runtime/ick_service.py` |
+| **Standalone verifier** | One dependency-free Python file that re-checks a log, its anchor and its signatures without running the kernel, for a reader who does not want to trust our binary. | `verifier/ickverify.py` |
 | **ICK kernel** (Rust) | Judges a proposal: `allow`, `deny` or `await_human_approval`, and issues a hash-linked receipt, optionally signed with an Ed25519 key. Never calls a model. | `crates/`, `contracts/` |
 | **Receipt chain, outcomes, anchor** | Each entry includes the previous one's id, so editing one breaks the rest. After a model call an *outcome* entry is chained in, pointing at the `allow` that permitted it. The anchor records the log's length and head, which also catches deleted *newest* entries. | kernel CLI (`--log`, `--anchor`, `record-outcome`) |
 | **Nova shell** (Python) | The model-facing API (OpenAI-style) and CLI. Asks the kernel before every model call when `NOVA_ICK_POLICY` is set; fails closed if the kernel is missing. | `nova-shell/` |
@@ -39,6 +40,8 @@ every decision and outcome ──► receipt log, if one is configured (each ent
 | **Small chat runtime** | A minimal governed chat loop (Groq, NVIDIA, OpenRouter) used to prove the kernel end to end. | `runtime/` |
 
 ## What you can rely on, and what you cannot
+
+The full version, including who the system does not stop, is `THREAT_MODEL.md`. A short form:
 
 - **Kernel first, or no call.** Covered paths: every provider route, streaming, the node tool that calls
   a local model, node gossip. Not covered: a model called from outside Nova.
@@ -78,7 +81,7 @@ Full instructions, settings and limits for each piece are in `README.md`.
 
 ## State of verification
 
-Tests: Rust 47, root Python 152, `nova-shell` 210 (+4 skipped). For the security-relevant rules, each
+Tests: Rust 47, root Python 169, `nova-shell` 210 (+4 skipped). For the security-relevant rules, each
 guard was removed in turn and a test failed. Run live against real Groq, NVIDIA and OpenRouter models:
 allow, deny, human approval, chained and anchored log, the operator screen in a real Chromium.
 
