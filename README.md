@@ -101,7 +101,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 107 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 128 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
@@ -200,7 +200,43 @@ it is given, so it cannot tell a human from Nova. These rules come from Nova, no
 - Nova keeps its own receipts too. The two systems now sit side by side, with the
   kernel's receipt id included in Nova's reply. They are not merged into one log.
 
+### Operator screen
+
+A small web page for the human who runs the system. It shows what Nova is waiting on
+(with an Approve button), whether the receipt log still verifies against its anchor, the
+most recent receipts, and whether Nova is up. It works on a phone-sized screen and in dark mode.
+
+```bash
+cd nova-shell
+python -m nova.operator_ui --approvals <approvals file> --state <state dir> \
+                           --log <receipt log> --anchor <anchor file> [--nova-url http://127.0.0.1:8080]
+# prints:  Operator screen: http://127.0.0.1:8765/#token=...   <- open exactly that link
+```
+
+The settings default to the same `NOVA_ICK_*` variables Nova uses. `--anchor-repo <git url>`
+(or `NOVA_ANCHOR_REPO`) adds a button that checks the log against the published anchor.
+
+**It is a separate process from the Nova API, on purpose.** Nova's API still has no route for
+approving, and a test checks that. Run the operator screen as the human operator's account, and
+keep the approvals file where the Nova server cannot write it. How the screen is locked down:
+- It listens on loopback only and refuses any other address.
+- Every data and action request needs a random token, printed once at startup. The token is
+  carried in the URL *fragment* (never sent to a server, so not in logs or Referer headers) and
+  removed from the address bar after sign-in.
+- The `Host` header must be its own loopback address (blocks DNS rebinding) and an `Origin`
+  header, when sent, must match (blocks other websites). No cross-origin access is granted.
+- A strict Content-Security-Policy with a fresh nonce on every page load. Data reaches the page as
+  JSON and is written with `textContent`, so hostile text (a request's target, say) is shown as
+  plain text and never runs. This was checked in a real Chromium.
+- The server enforces the same limits as the CLI plus its own: 1 minute to 24 hours, 1 to 100
+  uses, and a request must already be pending. It can write approval records and nothing else.
+
+**Limits.** The token is the only login: anyone who can read your terminal output or your
+browser can approve. There is no HTTPS (it never leaves the machine) and no "deny" button yet
+(a request you do not approve simply stays pending). The page refreshes every few seconds.
+Browser tests need Node with Playwright and Chromium and are skipped when those are missing.
+
 ## Planned
 
 1. Publish the anchor automatically (on a timer, or every N turns) instead of by hand.
-2. A minimal operator surface.
+2. A "deny" action on the operator screen, and a way to close or expire old pending requests.

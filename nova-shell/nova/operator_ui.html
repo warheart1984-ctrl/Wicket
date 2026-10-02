@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Nova operator</title>
+<style nonce="__NONCE__">
+  :root { --bg:#f6f7f9; --card:#fff; --text:#17202a; --muted:#5d6b7a; --line:#dde2e8; --accent:#2457d6;
+          --ok:#13794a; --okbg:#e3f5ec; --bad:#b3261e; --badbg:#fdebe9; --warn:#8a5a00; --warnbg:#fff3d6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12161b; --card:#1b2129; --text:#e7ebf0; --muted:#98a4b3; --line:#2d3641; --accent:#7aa2ff;
+            --ok:#5fd39a; --okbg:#10291e; --bad:#ff8f87; --badbg:#2e1513; --warn:#f0c15c; --warnbg:#2c2410; } }
+  * { box-sizing: border-box; }
+  [hidden] { display:none !important; }  /* author display rules must not override hidden */
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 14px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .chip { border-radius:999px; padding:4px 12px; font-size:13px; border:1px solid var(--line); background:var(--card); }
+  .chip.ok { background:var(--okbg); color:var(--ok); border-color:transparent; }
+  .chip.bad { background:var(--badbg); color:var(--bad); border-color:transparent; font-weight:600; }
+  .chip.warn { background:var(--warnbg); color:var(--warn); border-color:transparent; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 6px; border-top:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:13px; border-top:0; }
+  .muted { color:var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; overflow-wrap:anywhere; }
+  button, input, select { font:inherit; color:inherit; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:7px; padding:6px 14px; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--accent); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  input, select { background:var(--bg); border:1px solid var(--line); border-radius:7px; padding:5px 8px; }
+  input[type=number] { width: 4.5em; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .gap-top { margin-top:10px; }
+  .badge { border-radius:6px; padding:1px 8px; font-size:12.5px; }
+  .badge.allow { background:var(--okbg); color:var(--ok); }
+  .badge.deny { background:var(--badbg); color:var(--bad); }
+  .badge.await_human_approval { background:var(--warnbg); color:var(--warn); }
+  #banner { display:none; margin-bottom:14px; }
+  #banner.show { display:block; }
+  @media (max-width: 640px) {
+    /* rows become stacked cards, each value labelled by its column name */
+    thead { display:none; }
+    table, tbody, tr, td { display:block; width:100%; }
+    tr { border-top:1px solid var(--line); padding:8px 0; }
+    td { border:0; padding:3px 0; }
+    td::before { content:attr(data-label); display:block; color:var(--muted); font-size:12px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Nova operator</h1>
+  <div id="banner" class="card chip bad" role="alert"></div>
+
+  <div id="login" class="card" hidden>
+    <h2>Enter the access token</h2>
+    <p class="muted">The server printed a link with the token when it started. Opening that link signs you in; or paste the token here.</p>
+    <form id="login-form" class="row">
+      <input id="token-input" type="password" autocomplete="off" aria-label="Access token" size="40">
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+
+  <div id="app" hidden>
+    <div class="chips" id="chips" aria-live="polite"></div>
+
+    <section class="card">
+      <h2>Waiting for approval</h2>
+      <p class="muted" id="pending-empty">Nothing is waiting.</p>
+      <table id="pending-table" hidden>
+        <thead><tr><th>Action</th><th>Target</th><th>Effect / risk</th><th>Asked</th><th>Approve</th></tr></thead>
+        <tbody id="pending-body"></tbody>
+      </table>
+      <div class="row muted gap-top">
+        <label for="by">Approving as</label>
+        <input id="by" value="operator" maxlength="64" size="14">
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Approved and still usable</h2>
+      <p class="muted" id="approved-empty">None.</p>
+      <table id="approved-table" hidden>
+        <thead><tr><th>Approved by</th><th>Request</th><th>Uses left</th><th>Expires</th></tr></thead>
+        <tbody id="approved-body"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Recent receipts</h2>
+      <p class="muted" id="receipts-empty">No receipt log yet.</p>
+      <table id="receipts-table" hidden>
+        <thead><tr><th>#</th><th>Verdict</th><th>Reason</th><th>Receipt</th></tr></thead>
+        <tbody id="receipts-body"></tbody>
+      </table>
+      <div class="row gap-top" id="published-row" hidden>
+        <button class="secondary" id="check-published" type="button">Check against the published anchor</button>
+        <span id="published-result" class="muted" role="status"></span>
+      </div>
+    </section>
+  </div>
+</main>
+<script nonce="__NONCE__">
+"use strict";
+let token = "";
+let busy = false;
+const $ = (id) => document.getElementById(id);
+
+function el(tag, text, cls) {
+  const node = document.createElement(tag);
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  if (cls) node.className = cls;
+  return node;
+}
+function short(value, n) { value = String(value || ""); return value.length > n ? value.slice(0, n) + "…" : value; }
+function ago(seconds) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - seconds));
+  if (s < 90) return s + "s ago";
+  if (s < 5400) return Math.round(s / 60) + " min ago";
+  return Math.round(s / 3600) + " h ago";
+}
+function until(seconds) {
+  const s = Math.floor(seconds - Date.now() / 1000);
+  if (s <= 0) return "expired";
+  if (s < 5400) return "in " + Math.max(1, Math.round(s / 60)) + " min";
+  return "in " + Math.round(s / 3600) + " h";
+}
+function banner(message) {
+  const box = $("banner");
+  box.textContent = message || "";
+  box.classList.toggle("show", Boolean(message));
+}
+function showApp(signedIn) { $("login").hidden = signedIn; $("app").hidden = !signedIn; }
+
+async function api(path, body) {
+  const options = { headers: { "Authorization": "Bearer " + token } };
+  if (body !== undefined) {
+    options.method = "POST";
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(path, options);
+  let data = {};
+  try { data = await response.json(); } catch (_) { /* leave empty */ }
+  if (response.status === 401) { token = ""; showApp(false); throw new Error("The token was not accepted."); }
+  if (!response.ok) throw new Error(data.error || ("Request failed: " + response.status));
+  return data;
+}
+
+function cell(label, text, cls) {
+  const td = el("td", text, cls);
+  td.dataset.label = label;
+  return td;
+}
+
+function chip(text, cls) { return el("span", text, "chip " + (cls || "")); }
+
+function render(state) {
+  const chips = $("chips");
+  chips.replaceChildren();
+  const nova = state.nova.status;
+  chips.append(chip("Nova: " + nova, nova === "ok" ? "ok" : (nova === "not configured" ? "" : "bad")));
+  const log = state.log;
+  if (!log.present) chips.append(chip("Receipt log: none yet", "warn"));
+  else {
+    chips.append(chip(log.verified ? "Receipt log verified" : "RECEIPT LOG NOT VERIFIED", log.verified ? "ok" : "bad"));
+    chips.append(chip(log.count + " receipts"));
+    chips.append(chip(log.anchored ? "anchor on" : "no anchor", log.anchored ? "ok" : "warn"));
+    if (!log.verified) chips.append(chip(log.message, "bad"));
+  }
+
+  const pending = $("pending-body");
+  pending.replaceChildren();
+  for (const row of state.pending) {
+    const tr = el("tr");
+    tr.append(cell("Action", row.action), cell("Target", row.target, "mono"),
+              cell("Effect / risk", (row.effect || "?") + " / " + (row.risk || "?")),
+              cell("Asked", ago(row.requested_at)));
+    const actions = cell("Approve");
+    const box = el("div", null, "row");
+    const expires = el("select");
+    expires.setAttribute("aria-label", "Expires after");
+    for (const [label, value] of [["10 minutes", 600], ["1 hour", 3600], ["24 hours", 86400]]) {
+      const option = el("option", label); option.value = String(value); expires.append(option);
+    }
+    expires.value = "3600";
+    const uses = el("input"); uses.type = "number"; uses.min = "1"; uses.max = String(state.limits.max_uses);
+    uses.value = "1"; uses.setAttribute("aria-label", "Number of uses");
+    const button = el("button", "Approve"); button.type = "button";
+    button.addEventListener("click", () => approve(row, Number(expires.value), Number(uses.value), button));
+    box.append(expires, el("span", "×", "muted"), uses, button);
+    actions.append(box); tr.append(actions); pending.append(tr);
+  }
+  $("pending-table").hidden = state.pending.length === 0;
+  $("pending-empty").hidden = state.pending.length !== 0;
+
+  const approved = $("approved-body");
+  approved.replaceChildren();
+  for (const row of state.approved) {
+    const tr = el("tr");
+    tr.append(cell("Approved by", row.approved_by), cell("Request", short(row.proposal_hash, 24), "mono"),
+              cell("Uses left", row.remaining), cell("Expires", until(row.expires_at)));
+    approved.append(tr);
+  }
+  $("approved-table").hidden = state.approved.length === 0;
+  $("approved-empty").hidden = state.approved.length !== 0;
+
+  const receipts = $("receipts-body");
+  receipts.replaceChildren();
+  const recent = log.present ? log.recent : [];
+  for (const row of recent) {
+    const tr = el("tr");
+    const verdict = cell("Verdict"); verdict.append(el("span", row.verdict, "badge " + String(row.verdict).replace(/[^a-z_]/g, "")));
+    tr.append(cell("#", row.n), verdict, cell("Reason", (row.reason_codes || []).join(", ")),
+              cell("Receipt", short(row.receipt_id, 34), "mono"));
+    receipts.append(tr);
+  }
+  $("receipts-table").hidden = recent.length === 0;
+  $("receipts-empty").hidden = recent.length !== 0;
+  $("published-row").hidden = !state.can_check_published;
+}
+
+async function refresh() {
+  if (!token || busy) return;
+  try { render(await api("/api/state")); banner(""); }
+  catch (error) { banner(error.message); }
+}
+
+async function approve(row, expiresIn, uses, button) {
+  const what = row.action + " → " + row.target;
+  if (!window.confirm("Approve this request?\n\n" + what + "\n\nFor " + Math.round(expiresIn / 60) + " minutes, " + uses + " use(s).")) return;
+  busy = true; button.disabled = true;
+  try {
+    await api("/api/approve", { proposal_hash: row.proposal_hash, expires_in: expiresIn, uses: uses,
+                                approved_by: $("by").value.trim() || "operator" });
+    banner("");
+  } catch (error) { banner(error.message); }
+  busy = false;
+  await refresh();
+}
+
+$("check-published").addEventListener("click", async () => {
+  const out = $("published-result");
+  out.textContent = "Checking…";
+  try { const r = await api("/api/check-published", {}); out.textContent = (r.ok ? "OK: " : "FAILED: ") + r.message; }
+  catch (error) { out.textContent = error.message; }
+});
+
+$("login-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  token = $("token-input").value.trim(); $("token-input").value = "";
+  if (token) { showApp(true); refresh(); }
+});
+
+function takeTokenFromAddress() {
+  const match = /(?:^#|&)token=([^&]+)/.exec(location.hash);
+  if (!match) return;
+  token = decodeURIComponent(match[1]);
+  history.replaceState(null, "", location.pathname);  // keep the token out of the address bar
+  showApp(true);
+  refresh();
+}
+// Pasting a fresh link into a tab that is already open only changes the fragment.
+window.addEventListener("hashchange", takeTokenFromAddress);
+takeTokenFromAddress();
+showApp(Boolean(token));
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>
