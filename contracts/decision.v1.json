@@ -1,1 +1,81 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Infinity Decision v1","type":"object","required":["version","proposal_id","verdict","reason_codes","policy_hash","proposal_hash","decision_hash"]}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Infinity Decision v1",
+  "description": "The kernel's answer, as printed by `infinityctl evaluate` under `decision`. Its hash is what a receipt records. Produced only by the kernel, so this contract is exact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "proposal_id",
+    "verdict",
+    "reason_codes",
+    "policy_hash",
+    "proposal_hash",
+    "approval",
+    "invariants_checked",
+    "decision_hash"
+  ],
+  "properties": {
+    "version": {
+      "const": "infinity.decision.v1"
+    },
+    "proposal_id": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "allow",
+        "deny",
+        "await_human_approval"
+      ]
+    },
+    "reason_codes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]*$"
+      },
+      "description": "Upper-case codes such as SAFE_READ, ALLOWED, APPROVAL_REQUIRED, FORBIDDEN_EFFECT, POLICY_MISMATCH."
+    },
+    "policy_hash": {
+      "type": "string",
+      "pattern": "^sha3-256:[0-9a-f]{64}$"
+    },
+    "proposal_hash": {
+      "type": "string",
+      "pattern": "^sha3-256:[0-9a-f]{64}$"
+    },
+    "decision_hash": {
+      "type": "string",
+      "pattern": "^sha3-256:[0-9a-f]{64}$"
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "approval_id"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "approval_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "invariants_checked": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

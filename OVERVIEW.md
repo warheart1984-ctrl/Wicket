@@ -68,7 +68,7 @@ every decision and outcome ──► receipt log, if one is configured (each ent
 
 ```bash
 cargo build
-cd nova-shell && pip install -e . pytest PyYAML httpx && python -m pytest   # 187 pass, 4 skipped
+cd nova-shell && pip install -e . pytest PyYAML httpx && python -m pytest   # 193 pass, 4 skipped
 NOVA_ICK_POLICY=../demo/policy.json NOVA_PROVIDER=external \
 NOVA_EXTERNAL_URL=https://integrate.api.nvidia.com/v1 NOVA_EXTERNAL_API_KEY=... \
 NOVA_EXTERNAL_MODEL=nvidia/nemotron-3-super-120b-a12b python -m nova.api
@@ -77,7 +77,7 @@ Full instructions, settings and limits for each piece are in `README.md`.
 
 ## State of verification
 
-Tests: Rust 47, root Python 81, `nova-shell` 187 (+4 skipped). For the security-relevant rules, each
+Tests: Rust 47, root Python 142, `nova-shell` 193 (+4 skipped). For the security-relevant rules, each
 guard was removed in turn and a test failed. Run live against real Groq, NVIDIA and OpenRouter models:
 allow, deny, human approval, chained and anchored log, the operator screen in a real Chromium.
 
@@ -85,8 +85,8 @@ allow, deny, human approval, chained and anchored log, the operator screen in a 
 local-model tool against a real Ollama or vLLM (tested with fakes); Windows file locking for the last use of an
 approval, and the key-file permission check (Unix only);
 old undecided requests are never expired; the anchor publisher can run on a schedule (`watch`) and the operator screen shows how stale it is, but nothing starts it for you, it must run as a different user than Nova with push credentials Nova lacks, and it is untested against a hosted git service; the signing key lives in a file on the writing machine (no separate signer process, no key store or
-hardware key); no revocation or "valid until" for keys; the older proposal, policy and decision contracts
-still list required fields only (the receipt, outcome and anchor formats are strict). One full-suite failure was
+hardware key); no revocation or "valid until" for keys; all the JSON contracts are strict now, but they are only
+checked in tests (the kernel itself is more lenient than they are, by design). One full-suite failure was
 seen once and could not be reproduced in about 30 later runs (cause unknown).
 
 ## Where it came from

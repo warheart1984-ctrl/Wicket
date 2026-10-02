@@ -1,1 +1,44 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Infinity Policy v1","type":"object","required":["version","policy_id"]}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Infinity Policy v1",
+  "description": "The rules the kernel applies. Only version and policy_id are required; the three lists default to empty. As with proposals, the kernel is more lenient than this contract (it ignores unknown fields and denies a wrong version as UNKNOWN_POLICY_VERSION).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "policy_id"
+  ],
+  "properties": {
+    "version": {
+      "const": "infinity.policy.v1"
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "denied_effects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Effects that are always denied (POLICY_DENIED_EFFECT)."
+    },
+    "effects_requiring_approval": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Effects that wait for a human (APPROVAL_REQUIRED)."
+    },
+    "risks_requiring_approval": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Risk levels that wait for a human (APPROVAL_REQUIRED)."
+    }
+  }
+}
