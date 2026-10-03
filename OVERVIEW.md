@@ -73,7 +73,7 @@ The full version, including who the system does not stop, is `THREAT_MODEL.md`. 
 
 ```bash
 cargo build
-cd nova-shell && pip install -e . pytest PyYAML httpx && python -m pytest   # 210 pass, 4 skipped
+cd nova-shell && pip install -e . pytest PyYAML httpx && python -m pytest   # 213 pass, 4 skipped
 NOVA_ICK_POLICY=../demo/policy.json NOVA_PROVIDER=external \
 NOVA_EXTERNAL_URL=https://integrate.api.nvidia.com/v1 NOVA_EXTERNAL_API_KEY=... \
 NOVA_EXTERNAL_MODEL=nvidia/nemotron-3-super-120b-a12b python -m nova.api
@@ -82,7 +82,7 @@ Full instructions, settings and limits for each piece are in `README.md`.
 
 ## State of verification
 
-Tests: Rust 51, root Python 235, `nova-shell` 210 (+4 skipped). For the security-relevant rules, each
+Tests: Rust 52, root Python 246, `nova-shell` 213 (+4 skipped). For the security-relevant rules, each
 guard was removed in turn and a test failed. Run live against real Groq, NVIDIA and OpenRouter models:
 allow, deny, human approval, chained and anchored log, the operator screen in a real Chromium.
 

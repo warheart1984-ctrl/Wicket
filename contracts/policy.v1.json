@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Infinity Policy v1",
-  "description": "The rules the kernel applies. Only version and policy_id are required; the three lists default to empty. As with proposals, the kernel is more lenient than this contract (it ignores unknown fields and denies a wrong version as UNKNOWN_POLICY_VERSION).",
+  "description": "The rules the kernel applies. Only version and policy_id are required; the three lists default to empty. A policy can only RESTRICT, never grant: it can deny an effect or make it wait for a human. It cannot allow anything, and there is no allow-list. The kernel itself always denies the effects deploy, authority_change and audit_delete (FORBIDDEN_EFFECT) before it reads the policy, so with every list empty the only things that can ever be allowed are `read` and `write`. An empty policy is therefore not 'wide open': it is the least restrictive policy there is. As with proposals, the kernel is more lenient than this contract (it ignores unknown fields and denies a wrong version as UNKNOWN_POLICY_VERSION).",
   "type": "object",
   "additionalProperties": false,
   "required": [
