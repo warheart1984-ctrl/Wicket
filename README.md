@@ -86,8 +86,12 @@ The typed contracts are `contracts/receipt.v2.json` and `contracts/outcome.v1.js
   that can ever be allowed are `read` and `write`, and a policy with every list empty is the least restrictive one
   there is, not "wide open". There is no way to switch `deploy` on short of changing the kernel.
 - **`actor` is recorded, not enforced.** It is hashed into the proposal (so it cannot be altered afterwards) but the
-  kernel never reads it, no rule can mention it, and it is not authenticated. Nova writes the same actor for
-  every path through its gate. `target` and `effect` are likewise whatever the caller says (see `THREAT_MODEL.md`).
+  kernel never reads it, no rule can mention it, and it is not authenticated. Nova names which of its paths is
+  asking (`nova-shell/model-provider`, `nova-shell/local-model-tool`, `nova-shell/gossip`), so the log can tell
+  them apart, but that is Nova's own claim. `target` and `effect` are likewise whatever the caller says (see
+  `THREAT_MODEL.md`).
+  Upgrading changes the hash of every request, so an approval given before the upgrade no longer matches and
+  the request must be approved again.
 - Tests pin all of this (`tests/test_policy_semantics.py`), so a change to it cannot happen quietly.
 
 ### Contracts for the kernel's input and output
@@ -383,7 +387,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 213 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 216 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 

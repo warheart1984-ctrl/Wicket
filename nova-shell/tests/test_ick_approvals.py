@@ -525,3 +525,9 @@ def test_if_the_lock_cannot_be_taken_the_request_is_not_approved_and_the_approva
     assert not store.used_file.exists() or store.used_file.read_text() == ""  # nothing was spent
     assert store.claim("h1") is not None  # and once the lock is free the approval still works
     assert store.claim("h1") is None  # once only
+
+
+def test_a_pending_request_records_which_part_of_nova_asked(policy, store):
+    inner, provider = gated(policy, store)
+    refuse_and_get_hash(provider)
+    assert store.pending()[0]["actor"] == "nova-shell/model-provider"

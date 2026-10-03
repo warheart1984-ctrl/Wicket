@@ -196,7 +196,7 @@ def test_gossip_records_whether_each_send_worked(monkeypatch, paths):
 
 def test_gate_outcome_is_a_no_op_when_the_gate_is_off(monkeypatch):
     monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
-    assert gate_action(target="t", action="a", effect="read") is None
+    assert gate_action(target="t", action="a", effect="read", source="gossip") is None
     assert gate_outcome(None, status="completed") is None
 
 
