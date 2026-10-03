@@ -253,7 +253,7 @@ def test_nova_unit_settings_are_accepted_by_nova_and_the_forbidden_ones_are_abse
     for forbidden in ("NOVA_ICK_POLICY", "NOVA_ICK_SIGN_KEY", "NOVA_ICK_BIN", "NOVA_ICK_LOG"):
         assert forbidden not in env
     gate = IckGate.from_env({**env, "NOVA_ICK_STATE": "/tmp/x"})
-    assert gate is not None and str(gate.service) == "/run/ick/ick.sock"
+    assert gate is not None and gate.service == Path("/run/ick/ick.sock")  # a Path, so Windows spells it differently
     for forbidden in ("NOVA_ICK_POLICY", "NOVA_ICK_SIGN_KEY", "NOVA_ICK_BIN"):
         assert forbidden not in (DEPLOY / "etc/nova.env.example").read_text().replace("Do NOT put", "").split("NOVA_PROVIDER")[1]
     assert setting("nova-api.service", "ExecStart") == ["/opt/infinity-core/venv/bin/python -m nova.api"]
