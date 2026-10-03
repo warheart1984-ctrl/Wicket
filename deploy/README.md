@@ -37,6 +37,12 @@ It creates system accounts and services and listens on 127.0.0.1:18080: use a VM
 about. It is meant to be run by a person and read, and it has **not** been run yet under a booted systemd:
 the first run is the test. Run it from your own login with `sudo`, not from a root shell.
 
+## The anchor repository
+
+The publisher pushes one file, `anchor.jsonl`, to a branch named **`anchors`** (not `main`). To read it as
+a stranger would, use `git clone -b anchors <url>`. A plain `git clone` of a repository whose default
+branch is something else checks out nothing and looks empty. (`--branch` and `--name` change this.)
+
 ## The accounts
 
 | Account | What it is | May | May not |

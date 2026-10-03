@@ -475,3 +475,49 @@ def test_the_smoke_test_cleanup_only_removes_what_its_marker_vouches_for():
     assert text.index("preflight()") < text.index("install_files()") and "preflight\n  say" in text
     assert "rm -rf /etc/ick /etc/ick-publisher /etc/nova /var/lib/ick /var/lib/ick-publisher /var/lib/nova /run/ick" in cleanup
     assert "rm -rf /\n" not in text and "rm -rf $" not in text.replace("rm -rf /etc", "")
+
+
+@posix_only
+def test_the_published_anchor_is_on_the_anchors_branch_even_when_the_repository_defaults_elsewhere(tmp_path):
+    """The first real run of the smoke test failed here: a plain clone of the bare repository (whose HEAD
+    named a branch the publisher never pushes to) checked out nothing, and the check silently found no file."""
+    from runtime.chat import run_turn
+    from runtime.kernel import Kernel, KernelError, find_binary
+    import runtime.anchor_git as anchor_git
+
+    try:
+        binary = find_binary()
+    except KernelError:
+        pytest.skip("infinityctl not built")
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    key, pub = tmp_path / "k", tmp_path / "k.pub"
+    subprocess.run([binary, "keygen", "--out", str(key), "--public-out", str(pub)], check=True, capture_output=True)
+    policy = tmp_path / "p.json"
+    policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-demo-v1"}))
+    log, anchor = tmp_path / "l.jsonl", tmp_path / "a.jsonl"
+
+    class Client:
+        def __call__(self, url, payload, headers):
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    os.environ["GROQ_API_KEY"] = "k"
+    try:
+        run_turn("hi", "groq", Kernel(policy, log, binary=binary, anchor=anchor, sign_key=key), client=Client())
+    finally:
+        del os.environ["GROQ_API_KEY"]
+    remote = tmp_path / "r.git"
+    subprocess.run(["git", "-c", "init.defaultBranch=master", "init", "--bare", "-q", str(remote)], check=True)
+    anchor_git.publish(anchor, str(remote), log=log)
+    clone = subprocess.run(["git", "clone", "-q", str(remote), str(tmp_path / "c")], capture_output=True, text=True)
+    assert not (tmp_path / "c" / "anchor.jsonl").exists()  # the trap: a plain clone looks empty
+    shown = subprocess.run(["git", f"--git-dir={remote}", "show", "anchors:anchor.jsonl"], capture_output=True, text=True)
+    assert shown.returncode == 0 and shown.stdout.strip()
+    del clone
+
+
+def test_the_smoke_test_reads_the_published_anchor_from_the_anchors_branch():
+    text = SMOKE.read_text(encoding="utf-8")
+    assert "show anchors:anchor.jsonl" in text
+    assert "symbolic-ref HEAD refs/heads/anchors" in text
+    assert "git clone" not in text.split("verify_published()")[1].split("probes()")[0]  # not the trap

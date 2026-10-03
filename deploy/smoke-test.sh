@@ -41,7 +41,7 @@ ok()   { PASS=$((PASS+1)); printf 'PASS  %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf 'FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '      %s\n' "$2"; }
 check() { # check "what" cmd...   passes if the command succeeds
   local what="$1"; shift
-  local out; if out=$("$@" 2>&1); then ok "$what"; else bad "$what" "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
+  local out; if out=$("$@" 2>&1); then ok "$what"; else bad "$what" "$(printf '%s' "$out" | tail -8 | tr '\n' ' ')"; fi
 }
 refused() { # refused "what" cmd...   passes if the command FAILS (an action that must be impossible)
   local what="$1"; shift
@@ -118,6 +118,7 @@ keys_and_policy() {
 
 publisher_setup() {
   git init --bare -q /var/lib/ick-publisher/anchors.git &&
+  git --git-dir=/var/lib/ick-publisher/anchors.git symbolic-ref HEAD refs/heads/anchors &&
   chown -R ick-publisher:ick-publisher /var/lib/ick-publisher/anchors.git &&
   printf 'ANCHOR_REPO=/var/lib/ick-publisher/anchors.git\nANCHOR_INTERVAL=20\n' > /etc/ick-publisher/ick-anchor-watch.env &&
   chown ick-publisher:ick-publisher /etc/ick-publisher/ick-anchor-watch.env && chmod 0600 /etc/ick-publisher/ick-anchor-watch.env &&
@@ -159,13 +160,22 @@ import json; s=json.load(open("/var/lib/ick-publisher/status.json")); import sys
 sys.exit(0 if s.get("consecutive_failures")==0 and s.get("published_records",0)>=1 else 1)'; }
 
 verify_published() {
+  # The publisher pushes anchor.jsonl to the branch "anchors". Read it from there, as a stranger would.
   local tmp; tmp=$(mktemp -d) || return 1
-  git clone -q /var/lib/ick-publisher/anchors.git "$tmp/a" 2>/dev/null || { rm -rf "$tmp"; return 1; }
-  local file; file=$(ls "$tmp"/a/*.jsonl 2>/dev/null | head -1)
-  [ -n "$file" ] || { rm -rf "$tmp"; return 1; }
-  python3 "$PREFIX/verifier/ickverify.py" /var/lib/ick/log/receipts.jsonl --anchor "$file" \
-      --trusted-keys /etc/ick/trusted-keys.pub --require-signatures
-  local rc=$?; rm -rf "$tmp"; return $rc
+  local repo=/var/lib/ick-publisher/anchors.git
+  if ! git --git-dir="$repo" rev-parse --verify -q refs/heads/anchors >/dev/null 2>&1; then
+    echo "the anchor repository has no 'anchors' branch; branches: $(git --git-dir="$repo" branch --list | tr '\n' ' ')"
+    rm -rf "$tmp"; return 1
+  fi
+  if ! git --git-dir="$repo" show anchors:anchor.jsonl > "$tmp/anchor.jsonl" 2>"$tmp/err"; then
+    echo "cannot read anchor.jsonl from the anchors branch: $(cat "$tmp/err")"
+    rm -rf "$tmp"; return 1
+  fi
+  local out rc
+  out=$(python3 "$PREFIX/verifier/ickverify.py" /var/lib/ick/log/receipts.jsonl --anchor "$tmp/anchor.jsonl" \
+      --trusted-keys /etc/ick/trusted-keys.pub --require-signatures 2>&1); rc=$?
+  printf '%s\n' "$out" | grep -E '^(VERIFIED|NOT VERIFIED|  problem:|  note:)'
+  rm -rf "$tmp"; return $rc
 }
 
 probes() {
