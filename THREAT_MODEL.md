@@ -54,6 +54,15 @@ These are real limits, not fine print.
    that calls it says "a harmless read" and then does something else, the log faithfully records the
    harmless read. The log proves what was *asked* and what the policy *said*, not what *happened*.
    Outcomes ("completed", the hashes) are the caller's claim; they are signed and chained, not verified.
+1a. **Who is asking is not checked.** Every proposal has an `actor`, but the kernel never reads it and no policy
+   rule can mention it: it is recorded and hashed (so it cannot be edited later), not enforced, and not
+   authenticated. Nova writes the same actor, `nova-shell`, for every path that goes through its gate (model
+   calls, node tools, gossip), so the log tells paths apart by `action` and `target`, not by who. The same
+   goes for `target` and `effect`: they are the caller's assertions.
+1b. **A policy can only restrict.** It can deny an effect or make it wait for a human. It cannot grant. The
+   kernel always denies `deploy`, `authority_change` and `audit_delete` before it reads the policy, so the only
+   things that can ever be allowed are `read` and `write`. An empty policy (`denied_effects: []`) is the
+   *least* restrictive one possible, not a wide-open one, and there is no way to enable `deploy`.
 2. **Not asking at all.** A taken-over caller can skip the gate. The log then has gaps, but nothing in
    the log shows a gap. Absence of an entry is never evidence.
 3. **Whoever holds the signing key.** In the basic setup the key is a file on the machine that writes

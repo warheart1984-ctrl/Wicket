@@ -35,7 +35,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (235 pass)
+python -m pytest        # offline tests, no keys needed (246 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -76,6 +76,19 @@ also reports `N allowed without an outcome`: calls still running, never finished
 not be written. The Nova gate and the small runtime record an outcome after every call; if it cannot be
 written the reply is withheld (for a stream, whose text is already out, the gap is reported instead).
 The typed contracts are `contracts/receipt.v2.json` and `contracts/outcome.v1.json`.
+
+### What a policy can and cannot say
+
+- **A policy only restricts.** It has three lists: `denied_effects` (always refused), `effects_requiring_approval`
+  and `risks_requiring_approval` (wait for a human). It cannot allow anything; there is no allow-list.
+- **The kernel decides some things before it reads the policy.** `deploy`, `authority_change` and
+  `audit_delete` are always denied (`FORBIDDEN_EFFECT`). An unknown effect or risk is denied. So the only effects
+  that can ever be allowed are `read` and `write`, and a policy with every list empty is the least restrictive one
+  there is, not "wide open". There is no way to switch `deploy` on short of changing the kernel.
+- **`actor` is recorded, not enforced.** It is hashed into the proposal (so it cannot be altered afterwards) but the
+  kernel never reads it, no rule can mention it, and it is not authenticated. Nova writes the same actor for
+  every path through its gate. `target` and `effect` are likewise whatever the caller says (see `THREAT_MODEL.md`).
+- Tests pin all of this (`tests/test_policy_semantics.py`), so a change to it cannot happen quietly.
 
 ### Contracts for the kernel's input and output
 
@@ -370,7 +383,7 @@ and packaging scripts.
 ```bash
 cd nova-shell
 pip install -e .          # fastapi, pydantic, uvicorn (tests also need pytest, PyYAML, httpx)
-python -m pytest          # 210 pass, 4 skipped (the skips test parts that were left out)
+python -m pytest          # 213 pass, 4 skipped (the skips test parts that were left out)
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
