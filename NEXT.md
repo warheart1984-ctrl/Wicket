@@ -6,7 +6,10 @@
 - Wait for BOTH the Linux and Windows CI jobs to be green before the owner merges.
 
 ## State of the project
-- Project name: **Wicket** (formerly infinity-core). Repo: `warheart1984-ctrl/Wicket`.
+- Project name: **Wicket** (formerly infinity-core). Repo: `warheart1984-ctrl/Wicket`
+  (owner name has `1984`; `warheart-ctrl/Wicket` does not exist). The old `infinity-core` URL redirects.
+- A new checkout needs no extra repo: clone Wicket, or on an old one run the `set-url` command under
+  Owner housekeeping, then `git checkout main && git pull`.
 - Everything through PR 35 is merged to `main`.
 - Technical names keep the old spelling on purpose: `infinityctl`, the `ick-*` accounts,
   `/opt/infinity-core`, file names, and the signed strings `infinity-core/entry/v1` and
@@ -21,6 +24,17 @@ that the action actually executed was the one authorized. Planned work:
 2. Add an independent execution witness: a component Nova does not control that checks the
    actual call against the authorized proposal's hash and records a signed "divergence" entry on
    mismatch. Test it with the attack: get a receipt for a harmless read, do something else.
+
+## Reviewer's attack list
+An outside reviewer's six areas (execution gap, identity and authority, time, concurrency, degradation,
+human approval load) are in `THREAT_MODEL.md` as untested gaps. The design for the first is
+`docs/execution-binding-design.md` (a proposal, not built). The owner plans to send it to the reviewer to
+break on paper before it is built. Do not build it until that feedback is in, unless the owner says so.
+Keep the reviewer's contact details out of the repo.
+
+## Test counts
+Last recorded: Rust 47, root Python 91, `nova-shell` 203 (4 skipped). `main` has gained tests since,
+so rerun `cargo test` and `python -m pytest` (root and `nova-shell`) for current numbers.
 
 ## Other open items
 - The reviewer's other points: actor not authenticated, time not proven correct, concurrency and

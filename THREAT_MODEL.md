@@ -34,6 +34,35 @@ The reader must supply two things the log cannot supply for itself:
 | **Trusted keys** | A file you got from the operator over a channel an attacker on the log host does not control | A forger just adds their own key. Signatures then prove nothing |
 | **Anchor** | A copy you fetched yourself from the published anchor repository | An attacker who can edit the log can edit the anchor next to it, so deleted entries go unnoticed |
 
+## Proposed, authorized, dispatched, executed, observed
+
+A receipt is evidence about the first two of five stages. The other three are not proven.
+
+| Stage | Proven today? |
+|---|---|
+| Proposed (the caller described an action) | Yes: recorded and hashed |
+| Authorized (the kernel judged it under the policy) | Yes: signed, chained receipt |
+| Dispatched (a concrete call was sent) | No |
+| Executed (the target did it) | No |
+| Observed (an independent party saw the effect) | No |
+
+Wicket is an authorization and evidence boundary between proposed machine action and execution. It is not a
+guarantee about what the world then did. A design to close the gap between authorized and dispatched is in
+[`docs/execution-binding-design.md`](docs/execution-binding-design.md); it is not built.
+
+## Attack areas from an outside review (none tested yet)
+
+An outside reviewer said where they would attack first. Each is a gap today, not a fixed item.
+
+| Area | The attack | Status |
+|---|---|---|
+| Semantic boundary | Valid receipt for a harmless read, then a materially different action; every receipt verifies | Gap; design in `docs/execution-binding-design.md` |
+| Identity and authority | `actor` is a caller assertion. Needs binding among actor, role, authority, action, target, policy version and context | Gap (see 1a) |
+| Time | Reorder, delay, duplicate, replay and partition events. Event, receipt, observation, authorization and execution time differ | Gap (see 6) |
+| Concurrency | Races between separately authorized actions; approval for state S0 used against S1; cumulative effects that cross a limit no single request does | Not tested; nothing tracks state |
+| Degradation | Signer or kernel lost, stale anchors, slow approval, recovery after reconnecting. What does the larger system do when Wicket fails closed | Fails closed (tested); the knock-on effects are not modelled |
+| Human boundary | Enough legitimate approval demand to cause queue pressure, habituation, stale approvals and triage | Gap (see 5); no load test |
+
 ## Who the system is built to stop
 
 | An attacker who can... | Stopped by | Result |
