@@ -263,21 +263,61 @@ def read_log(text: str) -> List[Dict[str, Any]]:
     return entries
 
 
-def read_trusted_keys(text: str) -> Dict[str, bytes]:
-    keys: Dict[str, bytes] = {}
+class TrustedKeys(Dict[str, bytes]):
+    """key id -> public key, plus `cutoffs`: key id -> the last receipt that key is trusted for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cutoffs: Dict[str, str] = {}
+
+
+def _is_receipt_id(text: str) -> bool:
+    return text.startswith("receipt:sha3-256:") and _hex_bytes(text[len("receipt:sha3-256:"):], 32) is not None
+
+
+def read_trusted_keys(text: str) -> TrustedKeys:
+    """One key per line: `ed25519-public:<hex>`, optionally `through receipt:sha3-256:<hex>`."""
+    keys = TrustedKeys()
     for number, line in enumerate(_lines(text), 1):
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
-        raw = _hex_bytes(line[len(PUBLIC_PREFIX):], 32) if line.startswith(PUBLIC_PREFIX) else None
+        words = line.split()
+        through = None
+        if len(words) == 3 and words[1] == "through" and _is_receipt_id(words[2]):
+            through = words[2]
+        elif len(words) != 1:
+            raise Problem(f"trusted keys line {number}: expected {PUBLIC_PREFIX}<64 hex digits>, optionally "
+                          "followed by `through receipt:sha3-256:<64 hex digits>`")
+        raw = _hex_bytes(words[0][len(PUBLIC_PREFIX):], 32) if words[0].startswith(PUBLIC_PREFIX) else None
         if raw is None:
             raise Problem(f"trusted keys line {number}: expected {PUBLIC_PREFIX}<64 hex digits>")
         if _decompress(raw) is None:
             raise Problem(f"trusted keys line {number}: not a valid Ed25519 public key")
-        keys[key_id_for(raw)] = raw
+        key_id = key_id_for(raw)
+        if key_id in keys:
+            raise Problem(f"trusted keys line {number}: this key is listed twice")
+        keys[key_id] = raw
+        if through is not None:
+            keys.cutoffs[key_id] = through
     if not keys:
         raise Problem("the trusted keys file lists no keys")
     return keys
+
+
+def position_allowed(keys: TrustedKeys, key_id: str, position: int, entries: List[Dict[str, Any]]) -> Optional[str]:
+    """None if `key_id` is trusted at 1-based `position`; otherwise why not. A key limited to an earlier
+    receipt is trusted only up to it, and if that receipt is not in this log nothing it signed is accepted."""
+    receipt = keys.cutoffs.get(key_id)
+    if receipt is None:
+        return None
+    for index, entry in enumerate(entries):
+        if entry["receipt_id"] == receipt:
+            if position > index + 1:
+                return (f"the key {key_id} was retired or revoked after entry {index + 1}, "
+                        f"but this is entry {position}")
+            return None
+    return f"the key {key_id} is trusted only through {receipt}, which is not in this log"
 
 
 # --- the checks ------------------------------------------------------------------------------------
@@ -317,7 +357,7 @@ def _signature_ok(keys: Dict[str, bytes], key_id: str, message: bytes, signature
     return raw is not None and ed25519_verify_strict(keys[key_id], message, raw)
 
 
-def check_signatures(entries: List[Dict[str, Any]], keys: Dict[str, bytes], require: bool) -> Tuple[Optional[str], int]:
+def check_signatures(entries: List[Dict[str, Any]], keys: TrustedKeys, require: bool) -> Tuple[Optional[str], int]:
     signed = 0
     for index, entry in enumerate(entries):
         number = index + 1
@@ -327,6 +367,9 @@ def check_signatures(entries: List[Dict[str, Any]], keys: Dict[str, bytes], requ
                 return f"entry {number}: signed by a key that is not trusted ({key_id})", signed
             if not _signature_ok(keys, key_id, _entry_message(key_id, entry["receipt_id"]), signature):
                 return f"entry {number}: its signature does not verify", signed
+            why = position_allowed(keys, key_id, number, entries)
+            if why:
+                return f"entry {number}: {why}", signed
             signed += 1
         elif key_id is None and signature is None:
             if require:
@@ -338,7 +381,7 @@ def check_signatures(entries: List[Dict[str, Any]], keys: Dict[str, bytes], requ
     return None, signed
 
 
-def check_anchors(entries: List[Dict[str, Any]], text: str, keys: Optional[Dict[str, bytes]],
+def check_anchors(entries: List[Dict[str, Any]], text: str, keys: Optional[TrustedKeys],
                   require: bool) -> Tuple[Optional[str], int, int]:
     """Returns (problem, records checked, the largest count any record vouches for)."""
     signed_seen, checked, covered = False, 0, 0
@@ -366,6 +409,9 @@ def check_anchors(entries: List[Dict[str, Any]], text: str, keys: Optional[Dict[
                     return f"anchor line {number}: signed by a key that is not trusted ({key_id})", checked, covered
                 if not _signature_ok(keys, key_id, _anchor_message(key_id, count, head), signature):
                     return f"anchor line {number}: its signature does not verify", checked, covered
+                why = position_allowed(keys, key_id, count, entries)  # the anchor vouches for entries 1..count
+                if why:
+                    return f"anchor line {number}: {why}", checked, covered
                 signed_seen = True
             elif key_id is None and signature is None:
                 if require:

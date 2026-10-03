@@ -82,7 +82,7 @@ Full instructions, settings and limits for each piece are in `README.md`.
 
 ## State of verification
 
-Tests: Rust 47, root Python 209, `nova-shell` 210 (+4 skipped). For the security-relevant rules, each
+Tests: Rust 51, root Python 235, `nova-shell` 210 (+4 skipped). For the security-relevant rules, each
 guard was removed in turn and a test failed. Run live against real Groq, NVIDIA and OpenRouter models:
 allow, deny, human approval, chained and anchored log, the operator screen in a real Chromium.
 
@@ -90,7 +90,7 @@ allow, deny, human approval, chained and anchored log, the operator screen in a 
 local-model tool against a real Ollama or vLLM (tested with fakes); Windows file locking for the last use of an
 approval, and the key-file permission check (Unix only);
 the anchor publisher can run on a schedule (`watch`) and the operator screen shows how stale it is, (`deploy/` has systemd units, the accounts and an audit script for it, checked with `systemd-analyze`, in tests, and by one full run of `deploy/smoke-test.sh` on a Linux Mint machine with real accounts), it must run as a different user than Nova with push credentials Nova lacks, and it is untested against a hosted git service; the signing key can live in a separate signer service under another account (`runtime/ick_service.py`), but it is still a file (no key store or
-hardware key); no revocation or "valid until" for keys; all the JSON contracts are strict now, but they are only
+hardware key); a key can be retired or revoked by position in the log (not by date, and the signer is not told); all the JSON contracts are strict now, but they are only
 checked in tests (the kernel itself is more lenient than they are, by design). One full-suite failure was
 seen once and could not be reproduced in about 30 later runs (cause unknown).
 

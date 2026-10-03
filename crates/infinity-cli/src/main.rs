@@ -240,6 +240,10 @@ fn check_anchors_with(
                             "anchor line {line_no} has a signature that does not verify"
                         ));
                     }
+                    // An anchor vouches for the first `count` entries, so the key must be trusted
+                    // for the last of them.
+                    keys.allows_position(key_id, count, receipts)
+                        .map_err(|why| format!("anchor line {line_no}: {why}"))?;
                     signed_seen = true;
                 }
                 (None, None) if require => {

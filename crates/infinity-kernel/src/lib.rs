@@ -617,20 +617,46 @@ impl Signer {
 
 /// Public keys the verifier trusts. They must come from somewhere the log's writer cannot
 /// change; a key found inside the log proves nothing.
+///
+/// A key may be limited to an earlier part of the log: `<key> through <receipt id>` trusts it only
+/// for entries up to and including that receipt (and anchor records that cover no more than that).
+/// That is how a key is retired or revoked. It is a position in the hash chain, not a time: the
+/// time in an entry is written by whoever holds the key, so a stolen key could backdate.
 #[derive(Default)]
 pub struct TrustedKeys {
     keys: BTreeMap<String, VerifyingKey>,
+    cutoffs: BTreeMap<String, String>,
+}
+
+fn is_receipt_id(text: &str) -> bool {
+    text.strip_prefix("receipt:sha3-256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 impl TrustedKeys {
-    /// One `ed25519-public:<64 hex>` per line; blank lines and `#` comments are ignored.
+    /// One key per line: `ed25519-public:<64 hex>`, optionally followed by
+    /// `through receipt:sha3-256:<64 hex>`. Blank lines and `#` comments are ignored.
     pub fn from_text(text: &str) -> Result<Self, KernelError> {
         let mut keys = BTreeMap::new();
+        let mut cutoffs = BTreeMap::new();
         for (n, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
                 continue;
             }
-            let bytes = line
+            let mut words = line.split_whitespace();
+            let key_text = words.next().unwrap_or("");
+            let through = match (words.next(), words.next(), words.next()) {
+                (None, _, _) => None,
+                (Some("through"), Some(receipt), None) if is_receipt_id(receipt) => Some(receipt),
+                _ => {
+                    return Err(KernelError::Invalid(format!(
+                        "trusted keys line {}: expected {PUBLIC_PREFIX}<64 hex digits>, optionally followed by `through receipt:sha3-256:<64 hex digits>`",
+                        n + 1
+                    )))
+                }
+            };
+            let bytes = key_text
                 .strip_prefix(PUBLIC_PREFIX)
                 .and_then(from_hex::<32>)
                 .ok_or_else(|| {
@@ -645,22 +671,62 @@ impl TrustedKeys {
                     n + 1
                 ))
             })?;
-            keys.insert(key_id_for(&bytes), key);
+            let key_id = key_id_for(&bytes);
+            if keys.insert(key_id.clone(), key).is_some() {
+                return Err(KernelError::Invalid(format!(
+                    "trusted keys line {}: this key is listed twice",
+                    n + 1
+                )));
+            }
+            if let Some(receipt) = through {
+                cutoffs.insert(key_id, receipt.to_string());
+            }
         }
         if keys.is_empty() {
             return Err(KernelError::Invalid(
                 "the trusted keys file lists no keys".into(),
             ));
         }
-        Ok(TrustedKeys { keys })
+        Ok(TrustedKeys { keys, cutoffs })
     }
     pub fn from_signer(signer: &Signer) -> Self {
         let mut keys = BTreeMap::new();
         keys.insert(signer.key_id.clone(), signer.key.verifying_key());
-        TrustedKeys { keys }
+        TrustedKeys {
+            keys,
+            cutoffs: BTreeMap::new(),
+        }
     }
     pub fn contains(&self, key_id: &str) -> bool {
         self.keys.contains_key(key_id)
+    }
+    /// The last receipt this key is trusted for, if it has been retired or revoked.
+    pub fn cutoff(&self, key_id: &str) -> Option<&str> {
+        self.cutoffs.get(key_id).map(String::as_str)
+    }
+    /// Is `key_id` trusted for something at 1-based position `position` of `entries`? An entry
+    /// signed with a limited key must come at or before the receipt the limit names. If that receipt
+    /// is not in this log at all, nothing signed by the key is accepted: this may be a different
+    /// history, and the safe answer is no.
+    pub fn allows_position(
+        &self,
+        key_id: &str,
+        position: usize,
+        entries: &[LogEntry],
+    ) -> Result<(), String> {
+        let Some(receipt) = self.cutoff(key_id) else {
+            return Ok(());
+        };
+        match entries.iter().position(|e| e.receipt_id() == receipt) {
+            None => Err(format!(
+                "the key {key_id} is trusted only through {receipt}, which is not in this log"
+            )),
+            Some(index) if position > index + 1 => Err(format!(
+                "the key {key_id} was retired or revoked after entry {}, but this is entry {position}",
+                index + 1
+            )),
+            Some(_) => Ok(()),
+        }
     }
     fn check(&self, key_id: &str, message: &[u8], signature: &str) -> bool {
         let (Some(key), Some(bytes)) = (
@@ -726,6 +792,8 @@ pub fn verify_signatures(
                         "entry {position} has a signature that does not verify"
                     )));
                 }
+                keys.allows_position(key_id, position, entries)
+                    .map_err(|why| KernelError::Invalid(format!("entry {position}: {why}")))?;
                 signed += 1;
             }
             (None, None) => {
@@ -1320,5 +1388,110 @@ mod tests {
             "a private key is not a trusted public key"
         );
         assert!(TrustedKeys::from_text("ed25519-public:xyz").is_err());
+    }
+
+    // ---- retiring and revoking keys -------------------------------------------------------------
+
+    /// First two entries signed by `old`, the third by `new`: a planned hand-over.
+    fn rotated_chain(old: &Signer, new: &Signer) -> Vec<LogEntry> {
+        let mut entries = chain();
+        entries[0].sign(old);
+        entries[1].sign(old);
+        entries[2].sign(new);
+        entries
+    }
+    fn limited(old: &Signer, through: &str, new: &Signer) -> TrustedKeys {
+        TrustedKeys::from_text(&format!(
+            "{} through {through}\n{}\n",
+            old.public_key_text(),
+            new.public_key_text()
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_key_limited_to_an_entry_is_trusted_up_to_it_and_not_after() {
+        let (old, new) = (signer(1), signer(2));
+        let entries = rotated_chain(&old, &new);
+        // retired exactly at the hand-over: everything verifies
+        let keys = limited(&old, entries[1].receipt_id(), &new);
+        assert_eq!(verify_signatures(&entries, &keys, true).unwrap().signed, 3);
+        // retired one entry too early: the second entry is now after the limit
+        let early = limited(&old, entries[0].receipt_id(), &new);
+        let err = verify_signatures(&entries, &early, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("entry 2") && err.contains("retired or revoked"),
+            "{err}"
+        );
+        // the same key without a limit is trusted everywhere
+        let unlimited = trusting(&[&old, &new]);
+        assert!(verify_signatures(&entries, &unlimited, true).is_ok());
+    }
+
+    #[test]
+    fn a_stolen_key_cannot_sign_new_entries_after_its_limit() {
+        let (old, new) = (signer(1), signer(2));
+        let mut entries = rotated_chain(&old, &new);
+        let limit = entries[1].receipt_id().to_string();
+        // the thief appends a genuinely signed entry with the old key
+        let forged = allow_receipt(Some(entries.last().unwrap()), "2026-10-02T10:00:09Z");
+        let mut forged: LogEntry = forged.into();
+        forged.sign(&old);
+        entries.push(forged);
+        assert!(verify_log(&entries).unwrap());
+        assert!(
+            verify_signatures(&entries, &trusting(&[&old, &new]), true).is_ok(),
+            "without a limit the forgery is accepted: that is the problem the limit solves"
+        );
+        let err = verify_signatures(&entries, &limited(&old, &limit, &new), true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("entry 4") && err.contains("retired or revoked"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_limit_that_names_a_receipt_not_in_the_log_trusts_nothing_it_signed() {
+        let (old, new) = (signer(1), signer(2));
+        let entries = rotated_chain(&old, &new);
+        let elsewhere = format!("receipt:sha3-256:{}", "9".repeat(64));
+        let err = verify_signatures(&entries, &limited(&old, &elsewhere, &new), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in this log"), "{err}");
+        // but a log the limited key never signed is unaffected
+        let only_new = signed_chain(&new);
+        assert!(verify_signatures(&only_new, &limited(&old, &elsewhere, &new), true).is_ok());
+    }
+
+    #[test]
+    fn trusted_key_lines_with_limits_are_parsed_strictly() {
+        let key = signer(1).public_key_text();
+        let good = format!("receipt:sha3-256:{}", "a".repeat(64));
+        let keys = TrustedKeys::from_text(&format!("{key} through {good}  # retired\n")).unwrap();
+        assert_eq!(keys.cutoff(signer(1).key_id()), Some(good.as_str()));
+        assert_eq!(
+            TrustedKeys::from_text(&format!("{key}\n"))
+                .unwrap()
+                .cutoff(signer(1).key_id()),
+            None
+        );
+        for bad in [
+            format!("{key} through"),
+            format!("{key} through receipt:sha3-256:short"),
+            format!("{key} through {}", "a".repeat(64)),
+            format!("{key} until {good}"),
+            format!("{key} through {good} extra"),
+            format!("{key} {good}"),
+            format!("{key}\n{key}"),
+            format!("{key} through {good}\n{key}"),
+            format!("{key} through RECEIPT:sha3-256:{}", "a".repeat(64)),
+        ] {
+            assert!(TrustedKeys::from_text(&bad).is_err(), "{bad:?}");
+        }
     }
 }

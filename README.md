@@ -35,7 +35,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (209 pass)
+python -m pytest        # offline tests, no keys needed (235 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -117,7 +117,8 @@ infinityctl verify-log --log LOG --anchor A --trusted-keys signing.pub --require
   Once an entry is signed, every later one must be, so stripping only the newest signatures is always caught.
 - **Key hygiene.** The tool refuses a private key file that other users can read (`chmod 600`), refuses to
   overwrite on `keygen`, never prints the private key, and will not append an unsigned entry to a signed
-  log. A log can move to a new key: list both public keys in the trusted-keys file.
+  log. A log can move to a new key: list both public keys in the trusted-keys file, and limit the old one with
+  `through <receipt>` (see "Retiring or revoking a signing key" below).
 - **The operator screen** shows `signatures verified`, `NOT AUTHENTICATED: no signatures` or
   `signatures: not checked`, and takes `--trusted-keys` / `--require-signatures`. The anchor publisher takes
   the same two options.
@@ -132,6 +133,49 @@ infinityctl verify-log --log LOG --anchor A --trusted-keys signing.pub --require
   (backups, other accounts, a copied repository), not against a compromised writer. The signer service
   below fixes that, if you run it as another account.
 - Signatures prove who wrote an entry, not that the clock was right.
+
+### Retiring or revoking a signing key
+
+**In plain terms.** A signing key works like a rubber stamp. If the stamp is lost or stolen you do not want
+anything stamped *after the theft* to be believed, but what was stamped *before* it should still count. So the
+trusted-keys file can say a key is believed only up to a certain point in the log:
+
+```
+ed25519-public:1111...                                     # believed everywhere (as before)
+ed25519-public:2222... through receipt:sha3-256:ab12...    # believed only up to and including that entry
+```
+
+A line with `through` trusts that key for entries up to and including the named receipt, and for anchor
+records that cover no more than that. A signature by the key on anything later is refused, in
+`infinityctl verify-log`, in `verifier/ickverify.py`, on the operator screen and in the anchor publisher,
+because they all read this file.
+
+**Why a position in the log and not a date.** The time in an entry is written by whoever holds the key, so a
+thief could backdate. The position in the hash chain cannot be faked without breaking the chain and the
+published anchor, so that is what the limit uses.
+
+**Planned hand-over to a new key.** Make the new key (`infinityctl keygen`). Run
+`python verifier/ickverify.py receipts.jsonl` and note the `newest entry:` id: that is the old key's last entry.
+Change the trusted-keys line for the old key to `... through <that id>`, add the new public key, give people
+the new file (not through the log's own machine), and restart the signer with the new `signing.priv`. The log
+carries on; entries before the hand-over verify under the old key and later ones under the new one.
+
+**A stolen or leaked key.** Pick the newest entry you are sure is genuine (the last one covered by an anchor you
+published before the theft is a good choice), and limit the old key to it. Anything the thief signed after it
+fails verification. If entries from after that point are already in the log, the log will fail verification from
+there on, by design: archive that log (it is evidence only up to the limit), start a new log with a new key, and
+keep the old key's `through` line so the archive can still be checked. Testing covers exactly this
+(`tests/test_key_revocation.py`).
+
+**What this does not do.**
+- You choose the limit, and it is only as honest as your choice. Pick one too late and a forged entry slips in
+  under it; pick one too early and genuine entries are refused.
+- Nothing tells the signer its key is retired. It keeps signing until you swap the key file, and those entries then
+  fail verification, which is how you notice. The operator screen shows the failure.
+- There is no automatic revocation list, no expiry by date, and no "valid from": a new key is believed for the
+  whole log. A limit naming a receipt that is not in the log being checked means nothing that key signed is
+  accepted, because that log may be a different history.
+- Listing the same key twice is refused, and so is a limit that is not a receipt id.
 
 Typed contracts: `contracts/receipt.v2.json`, `contracts/outcome.v1.json` and `contracts/anchor.v1.json`
 (the latter two now allow the optional `key_id` and `signature`). The kernel gains one dependency,
@@ -205,8 +249,8 @@ NOVA_ICK_SERVICE=/run/ick/ick.sock python -m nova.api
   done. Outcomes ("completed", the hashes) are Nova's claim, now signed and chained.
 - Nova can still stop asking, or stop the service from being reachable. Rollback and silence are caught by
   the published anchor and `watch`, not by the signature.
-- The key is still a file, on the service's machine. There is no hardware key or key store, and no
-  revocation or "valid until" for keys.
+- The key is still a file, on the service's machine. There is no hardware key or key store. A key can be
+  retired or revoked by position in the log, but not by date, and the signer is not told.
 - Nothing starts the service for you unless you install the files in `deploy/` (systemd units for the
   signer, Nova and the anchor publisher, the accounts and directories they need, and an audit script; see
   `deploy/README.md`). `deploy/smoke-test.sh` has been run once, start to finish, on one Linux Mint machine with systemd and

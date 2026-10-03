@@ -68,8 +68,11 @@ These are real limits, not fine print.
    approve or deny. A tired human approving what they did not understand is outside the system.
 6. **The clock.** `issued_at` is supplied by the caller. A signature proves the signer asserted that
    time, not that it was true.
-7. **A stolen key stays trusted.** There is no revocation and no "valid until" for keys; a leaked key is
-   trusted until someone edits the trusted-keys file by hand.
+7. **A stolen key, until you act.** A key can be limited to an earlier point in the log with
+   `<key> through <receipt>` in the trusted-keys file, so entries it signs after that point are refused. The
+   limit is a position in the hash chain, not a date (a thief can backdate the time in an entry). It only helps
+   once someone notices and edits the file, it is only as honest as the point chosen, and the signer is not
+   told its key was retired. There is no automatic revocation and no expiry by date.
 8. **The provider.** The model provider can return anything. The outcome records a hash of the reply;
    it does not show the model produced it, or what a user was shown.
 9. **The publisher.** The anchor publisher must run as a different user from Nova with push credentials
@@ -95,7 +98,7 @@ The verifier prints this with every run, because the word is easy to over-read:
 - The anchor publisher has only been tested against local git repositories, not a hosted service.
 - Windows: no file locking for the last use of an approval, and no key-file permission check (Unix only).
   CI runs the suites there; it skips the tests of Unix-only behaviour.
-- No hardware keys or key store, no key revocation, no multi-party signing.
+- No hardware keys or key store, no automatic key revocation or expiry by date, no multi-party signing.
 - The kernel starts a process per decision. Throughput has not been measured.
 - `deploy/` has systemd units, accounts and an audit script for the signer, Nova and the publisher. They
   pass `systemd-analyze`, their commands run in tests, and `deploy/smoke-test.sh` has run them once under a
