@@ -165,6 +165,9 @@ Everything as root unless it says otherwise.
 - Backups of `/var/lib/ick` and `signing.priv` are yours to arrange. Losing the key stops new signing;
   losing the log loses the history, though a published anchor still shows that it existed.
 - Updating the checkout while the services run: restart them afterwards (`systemctl restart …`).
-- Key rotation: generate a new key, list **both** public keys in `trusted-keys.pub`, restart the signer
-  with the new `signing.priv`. There is no revocation: removing a leaked key from `trusted-keys.pub`
-  makes everything it signed fail verification, which is the only lever you have.
+- Key rotation: generate a new key, run `python3 verifier/ickverify.py` on the log and note the `newest entry:`
+  id, then in `trusted-keys.pub` change the old key's line to `ed25519-public:<hex> through <that id>`, add the
+  new public key, and restart the signer with the new `signing.priv`. For a **stolen** key use the newest entry
+  you are sure is genuine instead, and see the README section "Retiring or revoking a signing key": entries
+  the thief signed after that point fail verification, and the old log is then evidence only up to the limit.
+  Removing a key's line outright makes everything it ever signed fail, which is almost never what you want.
