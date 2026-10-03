@@ -25,6 +25,13 @@ that the action actually executed was the one authorized. Planned work:
    actual call against the authorized proposal's hash and records a signed "divergence" entry on
    mismatch. Test it with the attack: get a receipt for a harmless read, do something else.
 
+## Reviewer's attack list
+An outside reviewer's six areas (execution gap, identity and authority, time, concurrency, degradation,
+human approval load) are in `THREAT_MODEL.md` as untested gaps. The design for the first is
+`docs/execution-binding-design.md` (a proposal, not built). The owner plans to send it to the reviewer to
+break on paper before it is built. Do not build it until that feedback is in, unless the owner says so.
+Keep the reviewer's contact details out of the repo.
+
 ## Test counts
 Last recorded: Rust 47, root Python 91, `nova-shell` 203 (4 skipped). `main` has gained tests since,
 so rerun `cargo test` and `python -m pytest` (root and `nova-shell`) for current numbers.
