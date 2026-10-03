@@ -1,4 +1,6 @@
-# infinity-core
+# Wicket (formerly infinity-core)
+
+> Technical names keep the old spelling on purpose (`infinityctl`, the `ick-*` accounts, `/opt/infinity-core`, and the `infinity-core/…` strings inside signed data), because renaming them would break existing logs, signatures and installs.
 
 > New here? Start with [OVERVIEW.md](OVERVIEW.md): one page on what this is, how a request flows, and what to trust.
 
