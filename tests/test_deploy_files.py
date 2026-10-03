@@ -521,3 +521,78 @@ def test_the_smoke_test_reads_the_published_anchor_from_the_anchors_branch():
     assert "show anchors:anchor.jsonl" in text
     assert "symbolic-ref HEAD refs/heads/anchors" in text
     assert "git clone" not in text.split("verify_published()")[1].split("probes()")[0]  # not the trap
+
+
+# --- the key-switch helpers in the smoke test, run on real files without any services -------------------
+
+@bash_only
+def test_the_smoke_test_key_switch_helpers_do_what_the_live_run_relies_on(tmp_path):
+    from runtime.chat import run_turn
+    from runtime.kernel import Kernel, KernelError, find_binary
+
+    try:
+        binary = find_binary()
+    except KernelError:
+        pytest.skip("infinityctl not built")
+    (tmp_path / "log").mkdir()
+    log, anchor = tmp_path / "log" / "r.jsonl", tmp_path / "a.jsonl"
+    keys = {}
+    for name in ("old", "new"):
+        private, public = tmp_path / f"{name}.priv", tmp_path / f"{name}.pub"
+        subprocess.run([binary, "keygen", "--out", str(private), "--public-out", str(public)], check=True, capture_output=True)
+        keys[name] = (private, public.read_text(encoding="utf-8").strip())
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-demo-v1"}))
+
+    class Client:
+        def __call__(self, url, payload, headers):
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    os.environ["GROQ_API_KEY"] = "k"
+    try:
+        run_turn("before", "groq", Kernel(policy, log, binary=binary, anchor=anchor, sign_key=keys["old"][0]), client=Client())
+        limit_expected = json.loads(log.read_text().splitlines()[-1])["receipt_id"]
+        run_turn("after", "groq", Kernel(policy, log, binary=binary, anchor=anchor, sign_key=keys["new"][0]), client=Client())
+    finally:
+        del os.environ["GROQ_API_KEY"]
+
+    def sh(script, **extra):
+        env = {**os.environ, "SMOKE_SOURCE_ONLY": "1", "CTL": binary, "PREFIX": str(ROOT),
+               "VERIFIER": str(ROOT / "verifier" / "ickverify.py"), **extra}
+        return subprocess.run(["bash", "-c", f'source "{SMOKE}"; {script}'], capture_output=True, text=True, env=env, cwd=tmp_path)
+
+    first = sh(f'receipt_at "{log}" first')
+    last_before_switch = limit_expected
+    assert first.stdout.strip() == json.loads(log.read_text().splitlines()[0])["receipt_id"], first.stderr
+    assert sh(f'receipt_at "{log}" last').stdout.strip() == json.loads(log.read_text().splitlines()[-1])["receipt_id"]
+
+    limited, early, unlimited = tmp_path / "limited", tmp_path / "early", tmp_path / "unlimited"
+    sh(f'write_limited_trust "{limited}" "{keys["old"][1]}" "{last_before_switch}" "{keys["new"][1]}"')
+    sh(f'write_limited_trust "{early}" "{keys["old"][1]}" "{json.loads(log.read_text().splitlines()[0])["receipt_id"]}" "{keys["new"][1]}"')
+    sh(f'write_unlimited_trust "{unlimited}" "{keys["old"][1]}" "{keys["new"][1]}"')
+    assert limited.read_text(encoding="utf-8").splitlines()[0] == f'{keys["old"][1]} through {last_before_switch}'
+
+    good = sh(f'verify_files "{log}" "{anchor}" "{limited}"')
+    assert good.returncode == 0 and good.stdout.startswith("VERIFIED"), good.stdout
+    too_early = sh(f'verify_files "{log}" "{anchor}" "{early}"')
+    assert too_early.returncode != 0 and "retired or revoked" in too_early.stdout
+
+    thief_log, thief_anchor = tmp_path / "thief.log", tmp_path / "thief.anchor"
+    thief_log.write_bytes(log.read_bytes())
+    thief_anchor.write_bytes(anchor.read_bytes())
+    forged = sh(f'forge_with_key "{keys["old"][0]}" "{policy}" "{thief_log}" "{thief_anchor}"')
+    assert forged.returncode == 0, forged.stderr
+    assert len(thief_log.read_text().splitlines()) == len(log.read_text().splitlines()) + 1
+    assert sh(f'verify_files "{thief_log}" "{thief_anchor}" "{unlimited}"').returncode == 0  # accepted without the limit
+    refused = sh(f'verify_files "{thief_log}" "{thief_anchor}" "{limited}"')
+    assert refused.returncode != 0 and "retired or revoked" in refused.stdout  # refused with it
+
+
+def test_the_smoke_test_runs_the_key_switch_after_the_probes_and_cleans_up_its_secrets():
+    text = SMOKE.read_text(encoding="utf-8")
+    body = text[text.index("apply() {"):text.index("summary() {")]
+    assert body.index("  probes\n") < body.index("  key_switch\n") < body.index("  summary\n")
+    switch = text[text.index("key_switch() {"):text.index("probes() {")]
+    assert 'rm -rf "$WORK"' in switch and "chmod 700 \"$WORK\"" in switch  # the old private key copy is removed
+    assert 'forge_with_key "$WORK/old.priv" /etc/ick/policy.json "$WORK/thief.log"' in text  # never the live log
+    assert "ks_thief" in switch and "ks_too_early_refused" in switch and "verify_published" in switch

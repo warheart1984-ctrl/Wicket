@@ -253,8 +253,9 @@ NOVA_ICK_SERVICE=/run/ick/ick.sock python -m nova.api
   retired or revoked by position in the log, but not by date, and the signer is not told.
 - Nothing starts the service for you unless you install the files in `deploy/` (systemd units for the
   signer, Nova and the anchor publisher, the accounts and directories they need, and an audit script; see
-  `deploy/README.md`). `deploy/smoke-test.sh` has been run once, start to finish, on one Linux Mint machine with systemd and
-  real accounts (25 of 25 checks, including probes as the real users); nothing else has run them. Nova and
+  `deploy/README.md`). `deploy/smoke-test.sh` has passed in full on one Linux Mint machine with systemd and
+  real accounts (37 of 37 checks, including probes as the real users and a planned signing-key switch on
+  the running services); nothing else has run them. Nova and
   the service must be on the same machine (it is a Unix socket).
 - Running it as root, or as the same user as Nova, gives none of this. The test only proves the separation
   when the two really are different accounts.

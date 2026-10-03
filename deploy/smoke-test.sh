@@ -67,6 +67,10 @@ This would, as root, on this machine:
   9. run deploy/check_setup.py
  10. probe the separation as the real users (Nova cannot read the key, write the log or the policy,
      cannot see the anchor; the publisher cannot write the anchor or use the signer's socket)
+ 11. switch the signing key on the running services: limit the old key to its newest entry in the
+     trusted-keys file, install a new key, restart the signer, make another call, and check that the
+     whole log still verifies against the published anchor, that a limit placed too early is refused,
+     and that an entry added with the OLD key (on a copy of the log) is refused
 Nothing has been changed. Run again with --apply to do it, and with --cleanup afterwards to undo it.
 EOF
 }
@@ -178,6 +182,111 @@ verify_published() {
   rm -rf "$tmp"; return $rc
 }
 
+# ---- the key switch -------------------------------------------------------------------------------------
+# Retire the signing key at its newest entry, install a new one, and check that the log still verifies
+# across the hand-over, and that a stolen old key cannot add trusted entries afterwards. These helpers only
+# touch the files they are given, so they can be tried without the services.
+
+ctl() { printf '%s' "${CTL:-$PREFIX/target/release/infinityctl}"; }
+
+receipt_at() { # receipt_at LOG first|last : the receipt id of the first or last entry
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+rows = [l for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if l.strip()]
+print(json.loads(rows[0 if sys.argv[2] == "first" else -1])["receipt_id"])
+PY
+}
+
+write_limited_trust() { # write_limited_trust OUT OLD_KEY_LINE RECEIPT NEW_KEY_LINE : old key believed only through RECEIPT
+  printf '%s through %s\n%s\n' "$2" "$3" "$4" > "$1"
+}
+
+write_unlimited_trust() { # write_unlimited_trust OUT OLD_KEY_LINE NEW_KEY_LINE
+  printf '%s\n%s\n' "$2" "$3" > "$1"
+}
+
+verify_files() { # verify_files LOG ANCHOR KEYS : the standalone verifier, signatures required
+  local out rc
+  out=$(python3 "${VERIFIER:-$PREFIX/verifier/ickverify.py}" "$1" --anchor "$2" --trusted-keys "$3" --require-signatures 2>&1); rc=$?
+  printf '%s\n' "$out" | grep -E '^(VERIFIED|NOT VERIFIED|  problem:)'
+  return $rc
+}
+
+forge_with_key() { # forge_with_key PRIV POLICY LOG ANCHOR : append one genuinely signed entry to (a COPY of) a log
+  local tmp pid; tmp=$(mktemp) || return 1
+  pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["policy_id"])' "$2") || return 1
+  cat > "$tmp" <<JSON
+{"version":"infinity.proposal.v1","proposal_id":"forged-by-thief","actor":{"kind":"agent","id":"thief"},"action":"get_status","target":"demo","effect":"read","risk":"low","requires_human_approval":false,"policy_version":"$pid","payload":{},"evidence_refs":[]}
+JSON
+  "$(ctl)" evaluate --proposal "$tmp" --policy "$2" --log "$3" --anchor "$4" --sign-key "$1" >/dev/null
+  local rc=$?; rm -f "$tmp"; return $rc
+}
+
+published_matches_live() { # the published anchor is the same as the live one
+  local tmp; tmp=$(mktemp -d) || return 1
+  git --git-dir=/var/lib/ick-publisher/anchors.git show anchors:anchor.jsonl > "$tmp/p" 2>/dev/null &&
+  cmp -s "$tmp/p" /var/lib/ick/anchor/anchor.jsonl
+  local rc=$?; rm -rf "$tmp"; return $rc
+}
+
+two_keys_signed_everything() { # every entry is signed, by exactly two different keys
+  python3 - /var/lib/ick/log/receipts.jsonl <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if l.strip()]
+keys = {r.get("key_id") for r in rows}
+assert all(r.get("signature") for r in rows), "an entry is unsigned"
+assert len(keys) == 2, f"expected two signing keys, found {len(keys)}"
+PY
+}
+
+ks_prepare() { # remember what is needed, make the new key
+  receipt_at /var/lib/ick/log/receipts.jsonl last  > "$WORK/limit" &&
+  receipt_at /var/lib/ick/log/receipts.jsonl first > "$WORK/first" &&
+  cp /etc/ick/signing.priv "$WORK/old.priv" && cp /etc/ick/trusted-keys.pub "$WORK/old.pub" &&
+  "$(ctl)" keygen --out "$WORK/new.priv" --public-out "$WORK/new.pub" >/dev/null &&
+  chmod 600 "$WORK/old.priv" "$WORK/new.priv"
+}
+
+ks_switch() { # old key limited to its newest entry in the trusted file; new key installed; signer restarted
+  write_limited_trust "$WORK/trusted.new" "$(head -n1 "$WORK/old.pub")" "$(cat "$WORK/limit")" "$(head -n1 "$WORK/new.pub")" &&
+  install -m 0644 -o root -g root "$WORK/trusted.new" /etc/ick/trusted-keys.pub &&
+  install -m 0600 -o ick-signer -g ick-signer "$WORK/new.priv" /etc/ick/signing.priv &&
+  systemctl restart ick-signer
+}
+
+ks_too_early_refused() {
+  write_limited_trust "$WORK/early" "$(head -n1 "$WORK/old.pub")" "$(cat "$WORK/first")" "$(head -n1 "$WORK/new.pub")" &&
+  ! verify_files /var/lib/ick/log/receipts.jsonl /var/lib/ick/anchor/anchor.jsonl "$WORK/early"
+}
+
+ks_thief() { # a copy of the log gets an entry signed by the OLD key: refused with the limit, accepted without it
+  cp /var/lib/ick/log/receipts.jsonl "$WORK/thief.log" && cp /var/lib/ick/anchor/anchor.jsonl "$WORK/thief.anchor" &&
+  forge_with_key "$WORK/old.priv" /etc/ick/policy.json "$WORK/thief.log" "$WORK/thief.anchor" &&
+  write_unlimited_trust "$WORK/unlimited" "$(head -n1 "$WORK/old.pub")" "$(head -n1 "$WORK/new.pub")" &&
+  verify_files "$WORK/thief.log" "$WORK/thief.anchor" "$WORK/unlimited" >/dev/null &&
+  ! verify_files "$WORK/thief.log" "$WORK/thief.anchor" /etc/ick/trusted-keys.pub
+}
+
+key_switch() {
+  say "-- switching the signing key on the running services"
+  WORK=$(mktemp -d) || { bad "a private work directory"; return; }
+  chmod 700 "$WORK"
+  check "the old key's newest entry is noted and a new key made"          ks_prepare
+  check "old key limited to that entry, new key installed, signer restarted" ks_switch
+  check "the signer is back and answers"                                  wait_for 20 socket_info
+  check "ick-signer is active"                                            systemctl is-active --quiet ick-signer
+  check "Nova still answers, and the reply carries a receipt id"          nova_call
+  say "-- waiting for the publisher (every 20 s)"
+  check "the publisher pushed the new anchor"                             wait_for 90 published_matches_live
+  check "the whole log verifies across the switch, against the PUBLISHED anchor, signatures required" verify_published
+  check "every entry is signed, by exactly two keys"                      two_keys_signed_everything
+  check "a limit placed too early is refused (the entries after it fail)" ks_too_early_refused
+  check "an entry added with the OLD key is refused, and would be accepted without the limit" ks_thief
+  check "the permission audit still passes"                               python3 "$PREFIX/deploy/check_setup.py" --operator "$OPERATOR" --nova-env /etc/nova/nova.env
+  check "ick-anchor-watch is still active"                                systemctl is-active --quiet ick-anchor-watch
+  rm -rf "$WORK"
+}
+
 probes() {
   refused "Nova cannot read the signing key" runuser -u nova -- cat /etc/ick/signing.priv
   refused "Nova cannot append to the receipt log" runuser -u nova -- sh -c 'echo x >> /var/lib/ick/log/receipts.jsonl'
@@ -217,6 +326,7 @@ apply() {
   check "the permission audit passes"                  python3 "$PREFIX/deploy/check_setup.py" --operator "$OPERATOR" --nova-env /etc/nova/nova.env
   say "-- the separation, probed as the real users"
   probes
+  key_switch
   summary
 }
 
@@ -249,6 +359,8 @@ cleanup() {
   for g in ick-socket ick-audit; do getent group "$g" >/dev/null 2>&1 && groupdel "$g" 2>/dev/null; done
   say "Done. (Your own login keeps working; it was only added to the ick-audit group, which no longer exists.)"
 }
+
+[ "${SMOKE_SOURCE_ONLY:-}" = 1 ] && return 0 2>/dev/null
 
 case "$MODE" in
   dry) plan ;;
