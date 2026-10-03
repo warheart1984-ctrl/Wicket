@@ -209,7 +209,8 @@ NOVA_ICK_SERVICE=/run/ick/ick.sock python -m nova.api
   revocation or "valid until" for keys.
 - Nothing starts the service for you unless you install the files in `deploy/` (systemd units for the
   signer, Nova and the anchor publisher, the accounts and directories they need, and an audit script; see
-  `deploy/README.md`). Those files have not been run under a booted systemd with real accounts. Nova and
+  `deploy/README.md`). `deploy/smoke-test.sh` has been run once, start to finish, on one Linux Mint machine with systemd and
+  real accounts (25 of 25 checks, including probes as the real users); nothing else has run them. Nova and
   the service must be on the same machine (it is a Unix socket).
 - Running it as root, or as the same user as Nova, gives none of this. The test only proves the separation
   when the two really are different accounts.

@@ -15,8 +15,34 @@ no further:
   on SIGTERM; the publisher publishes one anchor to a git repository.
 - The audit script is tested against a file layout built with real, different owners and groups, and
   catches 19 deliberate mistakes.
-- **They have not been run under a booted systemd with real accounts**, and the publisher has not pushed
-  to a hosted git service. Expect to adjust paths for your machine, and watch the first start.
+- **`deploy/smoke-test.sh` has been run once, start to finish, under a booted systemd with real accounts
+  on one Linux Mint machine**: 25 of 25 checks, including the isolation probes as the real users. (Its first
+  run found a bug in the script's own check, since fixed.) Nothing else has been tried: other distributions,
+  a hosted git service, or a long-running soak. Expect to adjust paths, and watch the first start.
+
+## Try it on a disposable machine first
+
+`deploy/smoke-test.sh` does steps 1 to 9 below on the machine you run it on, using a local git repository
+as the anchor repository and Nova's built-in stub model (no network credentials, no API keys), then probes
+the separation **as the real users**: Nova cannot read the key, write the log or the policy, or see the
+anchor; the publisher cannot write the anchor or use the signer's socket. It leaves a marker file, and
+`--cleanup` removes everything it created and refuses to run on a machine without the marker.
+
+```bash
+cd infinity-core && cargo build --release      # as yourself
+sudo deploy/smoke-test.sh                       # dry run: prints the plan, changes nothing
+sudo deploy/smoke-test.sh --apply               # does it
+sudo deploy/smoke-test.sh --cleanup             # removes it
+```
+
+It creates system accounts and services and listens on 127.0.0.1:18080: use a VM, not a machine you care
+about. It is meant to be run by a person and read. Run it from your own login with `sudo`, not from a root shell.
+
+## The anchor repository
+
+The publisher pushes one file, `anchor.jsonl`, to a branch named **`anchors`** (not `main`). To read it as
+a stranger would, use `git clone -b anchors <url>`. A plain `git clone` of a repository whose default
+branch is something else checks out nothing and looks empty. (`--branch` and `--name` change this.)
 
 ## The accounts
 
