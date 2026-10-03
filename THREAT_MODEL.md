@@ -96,10 +96,13 @@ The verifier prints this with every run, because the word is easy to over-read:
 
 - No independent security review of any of this. It has been tested by its author.
 - The anchor publisher has only been tested against local git repositories, not a hosted service.
-- Windows: no file locking for the last use of an approval, and no key-file permission check (Unix only).
-  CI runs the suites there; it skips the tests of Unix-only behaviour.
+- Windows: no key-file permission check (Unix only). Counting approval uses is locked on both Unix and
+  Windows (checked in CI on both). CI runs the suites on Windows and skips the tests of Unix-only behaviour.
 - No hardware keys or key store, no automatic key revocation or expiry by date, no multi-party signing.
-- The kernel starts a process per decision. Throughput has not been measured.
+- The kernel starts a process per decision (about 2 ms), and every decision re-checks the whole log while
+  holding its lock, so the cost grows with the log: about 14 ms at 100 entries, 120 ms at 1,000 and 360 ms at
+  3,000 (`scripts/benchmark.py`, one 4-core Linux machine). That is a limit on how long one log can run
+  before you archive it and start a fresh one, which makes the evidence several logs, not one.
 - `deploy/` has systemd units, accounts and an audit script for the signer, Nova and the publisher. They
   pass `systemd-analyze`, their commands run in tests, and `deploy/smoke-test.sh` has run them under a
   booted systemd with real accounts on one Linux Mint machine (37 of 37 checks, with the separation probed

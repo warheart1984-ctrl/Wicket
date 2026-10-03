@@ -87,8 +87,9 @@ guard was removed in turn and a test failed. Run live against real Groq, NVIDIA 
 allow, deny, human approval, chained and anchored log, the operator screen in a real Chromium.
 
 **Not done / not verified:** publishing to a *hosted* git repo (tested with a local one); the
-local-model tool against a real Ollama or vLLM (tested with fakes); Windows file locking for the last use of an
-approval, and the key-file permission check (Unix only);
+local-model tool against a real Ollama or vLLM (tested with fakes); the key-file permission check on Windows (Unix only; the lock that counts approval uses works on both);
+every decision re-checks the whole log, so it gets slower as the log grows (about 12 ms per 100 entries,
+~120 ms at 1,000 entries; archive and start a fresh log, see `deploy/README.md`);
 the anchor publisher can run on a schedule (`watch`) and the operator screen shows how stale it is, (`deploy/` has systemd units, the accounts and an audit script for it, checked with `systemd-analyze`, in tests, and by one full run of `deploy/smoke-test.sh` on a Linux Mint machine with real accounts), it must run as a different user than Nova with push credentials Nova lacks, and it is untested against a hosted git service; the signing key can live in a separate signer service under another account (`runtime/ick_service.py`), but it is still a file (no key store or
 hardware key); a key can be retired or revoked by position in the log (not by date, and the signer is not told); all the JSON contracts are strict now, but they are only
 checked in tests (the kernel itself is more lenient than they are, by design). One full-suite failure was

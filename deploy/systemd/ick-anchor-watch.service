@@ -19,10 +19,13 @@ WorkingDirectory=/opt/infinity-core
 EnvironmentFile=/etc/ick-publisher/ick-anchor-watch.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=HOME=/var/lib/ick-publisher
+# The file name inside the anchor repository. Change it (in the env file) each time the log is rotated.
+Environment=ANCHOR_NAME=anchor.jsonl
 # Pin the host key and use only the deploy key, so a changed server is an error, not a prompt.
 Environment="GIT_SSH_COMMAND=ssh -i /etc/ick-publisher/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ick-publisher/known_hosts"
 ExecStart=/usr/bin/python3 -m runtime.anchor_git watch \
     --repo ${ANCHOR_REPO} \
+    --name ${ANCHOR_NAME} \
     --anchor /var/lib/ick/anchor/anchor.jsonl \
     --log /var/lib/ick/log/receipts.jsonl \
     --trusted-keys /etc/ick/trusted-keys.pub --require-signatures \

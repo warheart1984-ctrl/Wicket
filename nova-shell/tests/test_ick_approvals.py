@@ -469,3 +469,59 @@ def test_a_confirmation_prompt_with_no_input_refuses_instead_of_crashing(store, 
     assert cli_module.approve_command(approve) == 1 and "--yes" in capsys.readouterr().err
     assert cli_module.deny_command(deny) == 1 and "--yes" in capsys.readouterr().err
     assert not store.approvals_file.exists() and not store.denials_file.exists()
+
+
+# --- counting uses: one at a time, across processes -------------------------------------------------------
+
+RACER = '''
+import json, sys, time
+from nova.ick_approvals import ApprovalStore
+approvals, state, start_at, proposal_hash = sys.argv[1:5]
+store = ApprovalStore(approvals, state)
+while time.time() < float(start_at):
+    time.sleep(0.001)
+print("WON" if store.claim(proposal_hash) is not None else "LOST")
+'''
+
+
+def race(tmp_path, uses, racers, rounds):
+    """`racers` separate processes try to use an approval with `uses` uses at the same instant."""
+    store = ApprovalStore(tmp_path / "h" / "approvals.jsonl", tmp_path / "state")
+    outcomes = []
+    for r in range(rounds):
+        h = f"sha3-256:round{r}"
+        store.record_pending(proposal_hash=h, summary={})
+        store.approve(h, approved_by="alice", uses=uses)
+        start = time.time() + 1.5
+        procs = [subprocess.Popen([sys.executable, "-c", RACER, str(store.approvals_file), str(tmp_path / "state"),
+                                   str(start), h], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  cwd=HERE, env={**os.environ, "PYTHONPATH": str(HERE)}) for _ in range(racers)]
+        results = [p.communicate(timeout=60) for p in procs]
+        for p, (out, err) in zip(procs, results):
+            assert p.returncode == 0, err
+        outcomes.append(sum(out.strip() == "WON" for out, _ in results))
+    return outcomes
+
+
+def test_simultaneous_attempts_cannot_use_the_last_approval_twice(tmp_path):
+    assert race(tmp_path, uses=1, racers=8, rounds=4) == [1, 1, 1, 1]
+
+
+def test_an_approval_with_three_uses_is_used_exactly_three_times_by_eight_racers(tmp_path):
+    assert race(tmp_path, uses=3, racers=8, rounds=2) == [3, 3]
+
+
+def test_if_the_lock_cannot_be_taken_the_request_is_not_approved_and_the_approval_is_not_spent(tmp_path, monkeypatch):
+    from nova import ick_approvals
+
+    store = ApprovalStore(tmp_path / "h" / "approvals.jsonl", tmp_path / "state")
+    store.record_pending(proposal_hash="h1", summary={})
+    store.approve("h1", approved_by="alice")
+    monkeypatch.setattr(ick_approvals, "LOCK_TIMEOUT", 0.3)
+    started = time.monotonic()
+    with ick_approvals._locked(store.used_file):  # somebody else is in the middle of counting
+        assert store.claim("h1") is None
+    assert 0.25 <= time.monotonic() - started < 5
+    assert not store.used_file.exists() or store.used_file.read_text() == ""  # nothing was spent
+    assert store.claim("h1") is not None  # and once the lock is free the approval still works
+    assert store.claim("h1") is None  # once only
