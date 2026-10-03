@@ -15,9 +15,10 @@ no further:
   on SIGTERM; the publisher publishes one anchor to a git repository.
 - The audit script is tested against a file layout built with real, different owners and groups, and
   catches 19 deliberate mistakes.
-- **`deploy/smoke-test.sh` has been run once, start to finish, under a booted systemd with real accounts
-  on one Linux Mint machine**: 25 of 25 checks, including the isolation probes as the real users. (Its first
-  run found a bug in the script's own check, since fixed.) Nothing else has been tried: other distributions,
+- **`deploy/smoke-test.sh` has passed in full under a booted systemd with real accounts on one Linux Mint
+  machine**: 37 of 37 checks, including the isolation probes as the real users and a planned signing-key
+  switch on the running services (limit the old key, install a new one, restart, and the whole log still
+  verifies against the published anchor). (Its first run found a bug in the script's own check, since fixed.) Nothing else has been tried: other distributions,
   a hosted git service, or a long-running soak. Expect to adjust paths, and watch the first start.
 
 ## Try it on a disposable machine first

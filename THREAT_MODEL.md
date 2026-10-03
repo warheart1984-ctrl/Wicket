@@ -101,9 +101,9 @@ The verifier prints this with every run, because the word is easy to over-read:
 - No hardware keys or key store, no automatic key revocation or expiry by date, no multi-party signing.
 - The kernel starts a process per decision. Throughput has not been measured.
 - `deploy/` has systemd units, accounts and an audit script for the signer, Nova and the publisher. They
-  pass `systemd-analyze`, their commands run in tests, and `deploy/smoke-test.sh` has run them once under a
-  booted systemd with real accounts on one Linux Mint machine (25 of 25 checks, with the separation probed
-  as the real users). Other distributions and setups are untested, and the audit reads ordinary permissions only (no ACLs, capabilities or
+  pass `systemd-analyze`, their commands run in tests, and `deploy/smoke-test.sh` has run them under a
+  booted systemd with real accounts on one Linux Mint machine (37 of 37 checks, with the separation probed
+  as the real users and a signing-key switch done on the running services). Other distributions and setups are untested, and the audit reads ordinary permissions only (no ACLs, capabilities or
   security modules). Nothing monitors that the services keep running.
 
 ## Questions to ask before relying on it
