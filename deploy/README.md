@@ -18,6 +18,25 @@ no further:
 - **They have not been run under a booted systemd with real accounts**, and the publisher has not pushed
   to a hosted git service. Expect to adjust paths for your machine, and watch the first start.
 
+## Try it on a disposable machine first
+
+`deploy/smoke-test.sh` does steps 1 to 9 below on the machine you run it on, using a local git repository
+as the anchor repository and Nova's built-in stub model (no network credentials, no API keys), then probes
+the separation **as the real users**: Nova cannot read the key, write the log or the policy, or see the
+anchor; the publisher cannot write the anchor or use the signer's socket. It leaves a marker file, and
+`--cleanup` removes everything it created and refuses to run on a machine without the marker.
+
+```bash
+cd infinity-core && cargo build --release      # as yourself
+sudo deploy/smoke-test.sh                       # dry run: prints the plan, changes nothing
+sudo deploy/smoke-test.sh --apply               # does it
+sudo deploy/smoke-test.sh --cleanup             # removes it
+```
+
+It creates system accounts and services and listens on 127.0.0.1:18080: use a VM, not a machine you care
+about. It is meant to be run by a person and read, and it has **not** been run yet under a booted systemd:
+the first run is the test. Run it from your own login with `sudo`, not from a root shell.
+
 ## The accounts
 
 | Account | What it is | May | May not |

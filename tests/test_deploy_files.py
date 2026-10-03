@@ -436,3 +436,42 @@ def test_the_audit_command_exits_nonzero_when_a_user_is_missing():
                            "--nova", "no-such-user-abc", "--publisher", "no-such-user-def"],
                           capture_output=True, text=True)
     assert done.returncode == 1 and "FAIL" in done.stdout
+
+
+# --- the smoke-test script (its dangerous modes are never run by the tests) -----------------------------
+
+SMOKE = DEPLOY / "smoke-test.sh"
+bash_only = pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None, reason="needs bash")
+
+
+@bash_only
+def test_the_smoke_test_script_is_valid_bash_and_defaults_to_a_dry_run():
+    assert subprocess.run(["bash", "-n", str(SMOKE)], capture_output=True).returncode == 0
+    env = {k: v for k, v in os.environ.items() if k != "SUDO_USER"}
+    done = subprocess.run(["bash", str(SMOKE)], capture_output=True, text=True, env=env)
+    assert done.returncode == 0 and "Nothing has been changed" in done.stdout
+    for step in ("systemd-sysusers", "LOCAL bare git repository", "ickverify.py", "check_setup.py", "probe the separation"):
+        assert step in done.stdout, step
+    bad = subprocess.run(["bash", str(SMOKE), "--nonsense"], capture_output=True, text=True)
+    assert bad.returncode == 2 and "unknown option" in bad.stderr
+
+
+@bash_only
+def test_apply_stops_before_changing_anything_when_it_cannot_be_safe(tmp_path):
+    """Run as a plain login with no sudo context: every route out must be a refusal, not a change."""
+    env = {k: v for k, v in os.environ.items() if k != "SUDO_USER"}
+    done = subprocess.run(["bash", str(SMOKE), "--apply"], capture_output=True, text=True, env=env)
+    assert done.returncode == 2 and done.stdout == "", done.stdout
+    assert "run this with sudo" in done.stderr or "own login" in done.stderr
+
+
+def test_the_smoke_test_cleanup_only_removes_what_its_marker_vouches_for():
+    text = SMOKE.read_text(encoding="utf-8")
+    cleanup = text[text.index("cleanup() {"):text.index('case "$MODE" in')]
+    guard = cleanup.index('if [ ! -f "$MARKER" ]')
+    assert guard < cleanup.index("rm -rf") and guard < cleanup.index("userdel") and guard < cleanup.index("systemctl stop")
+    assert "die " in cleanup[guard:cleanup.index("say \"Removing")]
+    assert 'printf \'created by deploy/smoke-test.sh' in text  # the marker the guard looks for is written
+    assert text.index("preflight()") < text.index("install_files()") and "preflight\n  say" in text
+    assert "rm -rf /etc/ick /etc/ick-publisher /etc/nova /var/lib/ick /var/lib/ick-publisher /var/lib/nova /run/ick" in cleanup
+    assert "rm -rf /\n" not in text and "rm -rf $" not in text.replace("rm -rf /etc", "")
