@@ -477,8 +477,9 @@ it is given, so it cannot tell a human from Nova. These rules come from Nova, no
   stops it approving itself.
 - This protects against requests arriving over the API or from model-driven tools. It does
   not protect against someone who can edit Nova's code or the approvals file.
-- On Windows, simultaneous use of the last approval is not locked (POSIX file locks only),
-  so two concurrent calls could both use it.
+- Uses are counted under a file lock on Unix and Windows (eight separate processes racing for a single-use
+  approval: exactly one wins; checked in CI on both). If the lock cannot be taken within 10 seconds the
+  request is refused and the approval is not spent.
 - A gossip round to the same peer has the same hash each time, so one approval covers
   one round unless you raise `--uses`.
 

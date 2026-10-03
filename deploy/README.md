@@ -160,6 +160,42 @@ Everything as root unless it says otherwise.
   `NOVA_ICK_SIGN_KEY` or `NOVA_ICK_BIN` next to `NOVA_ICK_SERVICE` makes Nova refuse to start, and the
   audit fails if `nova.env` names them.
 
+## When the log gets long: archive it and start a fresh one
+
+Every decision re-checks the whole existing log, including every signature, while holding the log's lock.
+So a decision gets slower as the log grows. Measured with `python3 scripts/benchmark.py` on one 4-core Linux
+machine (your hardware will differ):
+
+| entries already in the log | one decision |
+|---|---|
+| none (no log at all) | about 2 ms |
+| 100 | about 14 ms |
+| 1,000 | about 120 ms |
+| 3,000 | about 360 ms |
+
+That is about 12 ms more for every 100 entries; a call and its outcome are two entries. Through the signer
+service add a few milliseconds. At 10,000 entries expect over a second per call. Run the benchmark yourself and
+decide when to start a fresh log.
+
+**Rotating the log.** Do it when the publisher is up to date, and keep everything you move aside: the archive is
+evidence.
+1. Wait until the publisher has pushed the newest anchor (the operator screen shows "anchor published", or
+   compare the live anchor with `git show anchors:anchor.jsonl`).
+2. Stop the services: `systemctl stop nova-api ick-anchor-watch ick-signer`.
+3. Move the log and the anchor aside, together, into a new folder, for example
+   `/var/lib/ick/archive-2026-10/` (owner `ick-signer`, group `ick-audit`, mode 2750). Do not delete them.
+4. In `/etc/ick-publisher/ick-anchor-watch.env` set a **new** name: `ANCHOR_NAME=anchor-2.jsonl`. Publishing a
+   fresh anchor under the old name is refused on purpose, and the old file stays as the archive's evidence.
+5. Start the services again. The first call starts a new log whose first entry follows nothing: **the chain
+   is deliberately not continued across the rotation.** The link between the two logs is only the pair of
+   published files and your records.
+6. Check both: the new log against `anchor-2.jsonl` and the archive against `anchor.jsonl`, each with
+   `python3 verifier/ickverify.py LOG --anchor ANCHOR --trusted-keys /etc/ick/trusted-keys.pub`
+   (take the anchor from the `anchors` branch with `git show anchors:<name>`).
+
+The file-level part of this (the old name is refused, the new name works, both anchors stay, each log verifies
+against its own) is tested. A rotation on the live services has not been tried, so do the first one carefully.
+
 ## What this does not give you
 
 - Anyone with root on the machine can undo all of it. Separate accounts defend against a compromised
