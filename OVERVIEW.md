@@ -1,4 +1,4 @@
-# infinity-core: overview
+# Wicket: overview
 
 **What it is.** A gateway between people and AI models in which every model call must first be
 approved by a small, deterministic *kernel*, and every decision leaves a *receipt* that is hard

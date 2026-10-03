@@ -34,7 +34,7 @@ log) is refused. It leaves a marker file, and
 `--cleanup` removes everything it created and refuses to run on a machine without the marker.
 
 ```bash
-cd infinity-core && cargo build --release      # as yourself
+cd wicket && cargo build --release      # as yourself
 sudo deploy/smoke-test.sh                       # dry run: prints the plan, changes nothing
 sudo deploy/smoke-test.sh --apply               # does it
 sudo deploy/smoke-test.sh --cleanup             # removes it
@@ -83,7 +83,7 @@ Everything as root unless it says otherwise.
 
 1. **Install the program.**
    ```bash
-   git clone https://github.com/YOU/infinity-core /opt/infinity-core && cd /opt/infinity-core
+   git clone https://github.com/YOU/Wicket /opt/infinity-core && cd /opt/infinity-core
    cargo build --release                       # target/release/infinityctl
    python3 -m venv venv && venv/bin/pip install -e nova-shell
    ```

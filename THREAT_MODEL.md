@@ -1,6 +1,6 @@
 # What the receipts do and do not prove
 
-This is the one page to read before relying on `infinity-core` for anything that matters. It says who
+This is the one page to read before relying on Wicket for anything that matters. It says who
 the system defends against, what it cannot defend against, and how a stranger can check a log without
 trusting anyone who wrote it. Every claim here is either tested (the test is named) or listed as a gap.
 
