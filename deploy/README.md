@@ -15,8 +15,10 @@ no further:
   on SIGTERM; the publisher publishes one anchor to a git repository.
 - The audit script is tested against a file layout built with real, different owners and groups, and
   catches 19 deliberate mistakes.
-- **They have not been run under a booted systemd with real accounts**, and the publisher has not pushed
-  to a hosted git service. Expect to adjust paths for your machine, and watch the first start.
+- **`deploy/smoke-test.sh` has been run once, start to finish, under a booted systemd with real accounts
+  on one Linux Mint machine**: 25 of 25 checks, including the isolation probes as the real users. (Its first
+  run found a bug in the script's own check, since fixed.) Nothing else has been tried: other distributions,
+  a hosted git service, or a long-running soak. Expect to adjust paths, and watch the first start.
 
 ## Try it on a disposable machine first
 
@@ -34,8 +36,7 @@ sudo deploy/smoke-test.sh --cleanup             # removes it
 ```
 
 It creates system accounts and services and listens on 127.0.0.1:18080: use a VM, not a machine you care
-about. It is meant to be run by a person and read, and it has **not** been run yet under a booted systemd:
-the first run is the test. Run it from your own login with `sudo`, not from a root shell.
+about. It is meant to be run by a person and read. Run it from your own login with `sudo`, not from a root shell.
 
 ## The anchor repository
 
