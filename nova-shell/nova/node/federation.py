@@ -60,7 +60,7 @@ def gossip_to_peers() -> list[dict[str, Any]]:
             continue
         try:
             # Gossip sends this node's identity and policy hash to another server.
-            ick = gate_action(target=f"peer:{endpoint}", action="gossip_to_peer", effect="write")
+            ick = gate_action(target=f"peer:{endpoint}", action="gossip_to_peer", effect="write", source="gossip")
         except KernelRefusal as exc:
             results.append({"peer_id": peer_id, "status": "refused", "error": exc.code})
             continue

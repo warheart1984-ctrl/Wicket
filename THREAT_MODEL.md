@@ -56,9 +56,11 @@ These are real limits, not fine print.
    Outcomes ("completed", the hashes) are the caller's claim; they are signed and chained, not verified.
 1a. **Who is asking is not checked.** Every proposal has an `actor`, but the kernel never reads it and no policy
    rule can mention it: it is recorded and hashed (so it cannot be edited later), not enforced, and not
-   authenticated. Nova writes the same actor, `nova-shell`, for every path that goes through its gate (model
-   calls, node tools, gossip), so the log tells paths apart by `action` and `target`, not by who. The same
-   goes for `target` and `effect`: they are the caller's assertions.
+   authenticated. Nova names the path that is asking (`nova-shell/model-provider`, `nova-shell/local-model-tool`,
+   `nova-shell/gossip`), so the log can tell its paths apart, but that is Nova's own claim: a taken-over Nova
+   can write any name. The same goes for `target` and `effect`: they are the caller's assertions. Making the
+   actor trustworthy needs the signer service to stamp it from the account that connected, and there is
+   only one caller of that service today.
 1b. **A policy can only restrict.** It can deny an effect or make it wait for a human. It cannot grant. The
    kernel always denies `deploy`, `authority_change` and `audit_delete` before it reads the policy, so the only
    things that can ever be allowed are `read` and `write`. An empty policy (`denied_effects: []`) is the

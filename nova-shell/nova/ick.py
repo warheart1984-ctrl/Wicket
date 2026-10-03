@@ -265,8 +265,12 @@ class IckGate:
         action: str = "chat_completion",
         effect: str = "read",
         risk: str = "low",
+        source: str = "model-provider",
     ) -> dict[str, str]:
         """Return {"verdict", "receipt_id"} if allowed; raise KernelRefusal otherwise.
+
+        `source` names which part of Nova is asking (see `actor_for`); it ends up in the receipt's
+        proposal, so the log can tell Nova's paths apart.
 
         The default describes a model call. Other actions pass their own `action`/`effect`.
         A verdict that needs a human is cleared only by a matching approval (see
@@ -275,7 +279,7 @@ class IckGate:
         policy_id = self._policy_id()
         proposal = build_proposal(
             policy_id=policy_id, target=target, governed_request=governed_request,
-            action=action, effect=effect, risk=risk,
+            action=action, effect=effect, risk=risk, source=source,
         )
         out = self._run(proposal, [])
         verdict = str(out["decision"]["verdict"])
@@ -288,7 +292,7 @@ class IckGate:
         if verdict == "await_human_approval" and self.approvals is not None:
             self.approvals.record_pending(proposal_hash=proposal_hash, summary={
                 "action": action, "target": target, "effect": effect, "risk": risk,
-                "payload": proposal["payload"],
+                "actor": proposal["actor"]["id"], "payload": proposal["payload"],
             })
             if self.approvals.is_denied(proposal_hash):
                 raise KernelRefusal(
@@ -323,6 +327,18 @@ def _evidence(proposal: dict[str, Any]) -> dict[str, str]:
     return {"request_sha256": "sha256:" + digest} if digest else {}
 
 
+# Which part of Nova is asking. The kernel does not read the actor and no policy rule can use it, and it is
+# only as trustworthy as Nova itself; but it is hashed into the proposal, so the log records which path a
+# request came from instead of one name for all of them.
+SOURCES = ("model-provider", "local-model-tool", "gossip")
+
+
+def actor_for(source: str) -> dict[str, str]:
+    if source not in SOURCES:
+        raise ValueError(f"unknown source {source!r}; the paths through Nova's gate are {', '.join(SOURCES)}")
+    return {"kind": "agent", "id": f"nova-shell/{source}"}
+
+
 def build_proposal(
     *,
     policy_id: str,
@@ -331,6 +347,7 @@ def build_proposal(
     action: str,
     effect: str,
     risk: str,
+    source: str = "model-provider",
 ) -> dict[str, Any]:
     """A proposal that is identical for an identical request, so its hash is stable.
 
@@ -352,7 +369,7 @@ def build_proposal(
     return {
         "version": "infinity.proposal.v1",
         "proposal_id": "nova-" + hashlib.sha256(identity.encode()).hexdigest()[:32],
-        "actor": {"kind": "agent", "id": "nova-shell"},
+        "actor": actor_for(source),
         "action": action,
         "target": target,
         "effect": effect,
@@ -452,15 +469,19 @@ def gate_action(
     target: str,
     action: str,
     effect: str,
+    source: str,
     governed_request: dict[str, Any] | None = None,
     risk: str = "low",
 ) -> dict[str, str] | None:
-    """Ask the kernel about one action. Returns None when the gate is off; raises KernelRefusal."""
+    """Ask the kernel about one action. Returns None when the gate is off; raises KernelRefusal.
+
+    `source` is required, so every caller says which path it is (one of SOURCES)."""
     gate = IckGate.from_env()
     if gate is None:
         return None
     return gate.check(
-        target=target, governed_request=governed_request, action=action, effect=effect, risk=risk
+        target=target, governed_request=governed_request, action=action, effect=effect, risk=risk,
+        source=source,
     )
 
 

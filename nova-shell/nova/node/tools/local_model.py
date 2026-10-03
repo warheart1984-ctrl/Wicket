@@ -19,6 +19,7 @@ def generate(prompt: str, *, model: str | None = DEFAULT_CODER_MODEL, temperatur
         target=f"local_model:{active_model}",
         action="chat_completion",
         effect="read",
+        source="local-model-tool",
         governed_request={"messages": [{"role": "user", "content": prompt}]},
     )
     try:

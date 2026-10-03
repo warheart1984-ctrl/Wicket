@@ -299,3 +299,64 @@ def test_builtin_stub_chat_contacts_nothing(client, monkeypatch, deny_policy):
     monkeypatch.setenv("NOVA_ICK_POLICY", str(deny_policy))
     response = client.post("/v1/chat", json={"prompt": "hello"})
     assert response.status_code == 200 and response.json()["decision"] == "EXECUTED"
+
+
+# --- which part of Nova is asking ---------------------------------------------------------------------------
+
+def test_each_path_through_the_gate_names_itself_as_the_actor(monkeypatch, tmp_path):
+    """The log used to carry one actor for everything. Now model calls, the local-model tool and gossip differ."""
+    from nova.ick import IckGate, SOURCES
+    from nova.node import federation
+    from nova.node.tools import local_model
+
+    seen = []
+    real_run = IckGate._run
+
+    def spy(self, proposal, approval_ids):
+        seen.append((proposal["action"], proposal["actor"]))
+        return real_run(self, proposal, approval_ids)
+
+    monkeypatch.setattr(IckGate, "_run", spy)
+    allow = tmp_path / "allow.json"
+    allow.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-allow-v1"}))
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(allow))
+
+    # 1. a model call through the provider wrapper
+    class Provider:
+        model, provider_id = "m", "fake"
+        def chat_completion(self, governed_request):
+            return {"completion": {"id": "c", "model": "m", "created": 1, "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}]}, "receipt": {}}
+    IckGatedProvider(Provider(), IckGate.from_env()).chat_completion({"messages": [{"role": "user", "content": "hi"}]})
+    # 2. the local-model tool
+    monkeypatch.setattr(local_model, "_ollama_generate", lambda *a, **k: "text")
+    local_model.generate("hello")
+    # 3. gossip
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+    monkeypatch.setattr(federation, "load_peers", lambda: [{"peer_id": "p1", "endpoint": "http://peer.test"}])
+    monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
+    monkeypatch.setattr(federation.urllib.request, "urlopen", lambda request, timeout=None: Response())
+    federation.gossip_to_peers()
+
+    ids = [actor["id"] for _, actor in seen]
+    assert sorted(ids) == sorted(["nova-shell/model-provider", "nova-shell/local-model-tool", "nova-shell/gossip"])
+    assert set(i.split("/")[1] for i in ids) <= set(SOURCES)
+    assert all(actor["kind"] == "agent" for _, actor in seen)
+
+
+def test_a_source_must_be_one_of_the_known_paths_and_gate_action_requires_one():
+    import inspect
+
+    from nova.ick import actor_for, build_proposal, gate_action
+
+    assert actor_for("gossip") == {"kind": "agent", "id": "nova-shell/gossip"}
+    for bad in ("", "nova-shell", "gossip/../x", "root", "Gossip"):
+        with pytest.raises(ValueError):
+            actor_for(bad)
+    assert inspect.signature(gate_action).parameters["source"].default is inspect.Parameter.empty  # required
+    a = build_proposal(policy_id="p", target="t", governed_request=None, action="a", effect="read", risk="low", source="gossip")
+    b = build_proposal(policy_id="p", target="t", governed_request=None, action="a", effect="read", risk="low", source="local-model-tool")
+    assert a["actor"] != b["actor"]
