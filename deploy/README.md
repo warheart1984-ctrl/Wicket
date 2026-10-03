@@ -25,7 +25,11 @@ no further:
 `deploy/smoke-test.sh` does steps 1 to 9 below on the machine you run it on, using a local git repository
 as the anchor repository and Nova's built-in stub model (no network credentials, no API keys), then probes
 the separation **as the real users**: Nova cannot read the key, write the log or the policy, or see the
-anchor; the publisher cannot write the anchor or use the signer's socket. It leaves a marker file, and
+anchor; the publisher cannot write the anchor or use the signer's socket. Finally it does a **planned key
+switch on the running services**: it limits the old signing key to its newest log entry, installs a new key,
+restarts the signer, makes another call, and checks that the whole log still verifies against the published
+anchor, that a limit placed too early is refused, and that an entry added with the old key (on a copy of the
+log) is refused. It leaves a marker file, and
 `--cleanup` removes everything it created and refuses to run on a machine without the marker.
 
 ```bash
