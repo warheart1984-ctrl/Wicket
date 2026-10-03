@@ -40,10 +40,21 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-try:  # POSIX only; without it, two simultaneous uses of the last approval could both succeed.
+try:  # Unix file locks
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
+try:  # Windows file locks
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
+
+# How long to wait for the lock that makes "use the last approval" a one-at-a-time action.
+LOCK_TIMEOUT = 10.0
+
+
+class LockTimeout(OSError):
+    """The lock could not be taken in time. Callers treat that as "not approved", never as "approved"."""
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -69,17 +80,48 @@ def _append(path: Path, row: dict[str, Any]) -> None:
         handle.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def _try_lock(handle: Any) -> bool:
+    """One non-blocking attempt at an exclusive lock on the file; True if we now hold it."""
+    try:
+        if fcntl:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:  # pragma: no cover - no locking available on this platform
+            raise LockTimeout("this platform has no file locking, so approval uses cannot be counted safely")
+        return True
+    except (BlockingIOError, PermissionError):
+        return False
+    except OSError as exc:
+        if msvcrt and not fcntl:  # Windows reports a held lock as a plain OSError
+            return False
+        raise exc
+
+
+def _unlock(handle: Any) -> None:
+    if fcntl:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    elif msvcrt:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
 def _locked(path: Path) -> Iterator[None]:
+    """Hold an exclusive lock on a file next to `path` (works across processes on Unix and Windows).
+    Waits up to LOCK_TIMEOUT seconds, then raises LockTimeout."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.with_suffix(path.suffix + ".lock").open("a") as handle:
-        if fcntl:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+    with path.with_suffix(path.suffix + ".lock").open("a+") as handle:
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        while not _try_lock(handle):
+            if time.monotonic() >= deadline:
+                raise LockTimeout(f"could not lock {path} within {LOCK_TIMEOUT:g} s")
+            time.sleep(0.01)
         try:
             yield
         finally:
-            if fcntl:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+            _unlock(handle)
 
 
 DEFAULT_PENDING_TTL = 7 * 24 * 3600.0
@@ -121,22 +163,25 @@ class ApprovalStore:
         now = time.time() if now is None else now
         if self.is_denied(proposal_hash):
             return None
-        with _locked(self.used_file):
-            used = _read_jsonl(self.used_file)
-            for entry in _read_jsonl(self.approvals_file):
-                if entry.get("proposal_hash") != proposal_hash or not entry.get("approval_id"):
-                    continue
-                try:
-                    if float(entry["expires_at"]) <= now:
+        try:
+            with _locked(self.used_file):
+                used = _read_jsonl(self.used_file)
+                for entry in _read_jsonl(self.approvals_file):
+                    if entry.get("proposal_hash") != proposal_hash or not entry.get("approval_id"):
                         continue
-                    allowed_uses = int(entry.get("uses", 1))
-                except (KeyError, TypeError, ValueError):
-                    continue  # a malformed record never approves anything
-                taken = sum(1 for row in used if row.get("approval_id") == entry["approval_id"])
-                if taken < allowed_uses:
-                    _append(self.used_file, {"approval_id": entry["approval_id"],
-                                             "proposal_hash": proposal_hash, "used_at": now})
-                    return entry
+                    try:
+                        if float(entry["expires_at"]) <= now:
+                            continue
+                        allowed_uses = int(entry.get("uses", 1))
+                    except (KeyError, TypeError, ValueError):
+                        continue  # a malformed record never approves anything
+                    taken = sum(1 for row in used if row.get("approval_id") == entry["approval_id"])
+                    if taken < allowed_uses:
+                        _append(self.used_file, {"approval_id": entry["approval_id"],
+                                                 "proposal_hash": proposal_hash, "used_at": now})
+                        return entry
+        except LockTimeout:
+            return None  # could not count safely: do not approve
         return None
 
     # --- the human's side (CLI only) ---------------------------------------------------------

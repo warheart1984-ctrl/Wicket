@@ -199,6 +199,17 @@ pub enum KernelError {
     Invalid(String),
 }
 
+/// The exact text that gets hashed. Despite the name this is NOT the standard "canonical JSON" (RFC 8785):
+/// it is plain `serde_json::to_string`, and it is deterministic only because of how this crate uses it:
+///
+/// * objects are written with their keys in sorted order, because `serde_json::Value` keeps maps sorted
+///   unless its `preserve_order` feature is switched on, which would silently change every hash;
+/// * there are no spaces; strings are UTF-8 with only `"`, `\` and control characters escaped;
+/// * everything that is hashed holds text, lists, booleans, null and whole numbers. Fractions would be
+///   written by Rust's own shortest-form rules, which another implementation need not match.
+///
+/// `verifier/ickverify.py` reproduces this text for the data that is hashed, and a test compares the two
+/// on awkward strings, so a change here that breaks that agreement is caught.
 pub fn canonical_json(value: &Value) -> Result<String, KernelError> {
     Ok(serde_json::to_string(value)?)
 }
@@ -1493,5 +1504,17 @@ mod tests {
         ] {
             assert!(TrustedKeys::from_text(&bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_text_that_is_hashed_has_sorted_keys_no_spaces_and_plain_utf8() {
+        let value = json!({"b": [1, null, true], "a": {"z": "x", "y": "caf\u{e9} \u{1f600}"}, "c": "q\"\\\n\t\u{1}"});
+        assert_eq!(
+            canonical_json(&value).unwrap(),
+            "{\"a\":{\"y\":\"caf\u{e9} \u{1f600}\",\"z\":\"x\"},\"b\":[1,null,true],\"c\":\"q\\\"\\\\\\n\\t\\u0001\"}"
+        );
+        // the same data built in a different order gives the same text, so the same hash
+        let reordered = json!({"c": "q\"\\\n\t\u{1}", "a": {"y": "caf\u{e9} \u{1f600}", "z": "x"}, "b": [1, null, true]});
+        assert_eq!(hash_value(&value).unwrap(), hash_value(&reordered).unwrap());
     }
 }

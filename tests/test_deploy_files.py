@@ -217,7 +217,7 @@ def test_the_publisher_unit_command_runs_one_real_publish(tmp_path):
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
     status = tmp_path / "status.json"
-    mapping = {"${ANCHOR_REPO}": str(remote), "${ANCHOR_INTERVAL}": "300", "/var/lib/ick/anchor/anchor.jsonl": str(anchor),
+    mapping = {"${ANCHOR_REPO}": str(remote), "${ANCHOR_INTERVAL}": "300", "${ANCHOR_NAME}": "anchor.jsonl", "/var/lib/ick/anchor/anchor.jsonl": str(anchor),
                "/var/lib/ick/log/receipts.jsonl": str(log), "/etc/ick/trusted-keys.pub": str(pub),
                "/var/lib/ick-publisher/status.json": str(status)}
     command = [fill(a, mapping) for a in exec_args("ick-anchor-watch.service")] + ["--max-runs", "1"]
@@ -596,3 +596,70 @@ def test_the_smoke_test_runs_the_key_switch_after_the_probes_and_cleans_up_its_s
     assert 'rm -rf "$WORK"' in switch and "chmod 700 \"$WORK\"" in switch  # the old private key copy is removed
     assert 'forge_with_key "$WORK/old.priv" /etc/ick/policy.json "$WORK/thief.log"' in text  # never the live log
     assert "ks_thief" in switch and "ks_too_early_refused" in switch and "verify_published" in switch
+
+
+@posix_only
+def test_rotating_the_log_needs_a_new_published_name_and_keeps_the_old_evidence(tmp_path):
+    """Why rotation is needed: every append re-checks the whole log (see scripts/benchmark.py). How it is done:
+    archive the log and anchor, start fresh, and publish the fresh anchor under a NEW name. The old name is
+    kept as evidence for the archive, and publishing a fresh anchor under the old name is refused."""
+    from runtime.chat import run_turn
+    from runtime.kernel import Kernel, KernelError, find_binary
+    import runtime.anchor_git as anchor_git
+
+    try:
+        binary = find_binary()
+    except KernelError:
+        pytest.skip("infinityctl not built")
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    key, pub = tmp_path / "k", tmp_path / "k.pub"
+    subprocess.run([binary, "keygen", "--out", str(key), "--public-out", str(pub)], check=True, capture_output=True)
+    policy = tmp_path / "p.json"
+    policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-demo-v1"}))
+    remote = tmp_path / "r.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+
+    class Client:
+        def __call__(self, url, payload, headers):
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    def run(log_name, anchor_name, turns):
+        log, anchor = tmp_path / log_name, tmp_path / anchor_name
+        kernel = Kernel(policy, log, binary=binary, anchor=anchor, sign_key=key)
+        os.environ["GROQ_API_KEY"] = "k"
+        try:
+            for i in range(turns):
+                run_turn(f"t{i}", "groq", kernel, client=Client())
+        finally:
+            del os.environ["GROQ_API_KEY"]
+        return log, anchor
+
+    log1, anchor1 = run("log1.jsonl", "a1.jsonl", 2)
+    anchor_git.publish(anchor1, str(remote), log=log1, trusted_keys=pub)
+    log2, anchor2 = run("log2.jsonl", "a2.jsonl", 2)  # the rotated, fresh log
+    with pytest.raises(anchor_git.AnchorRefused):  # the old name belongs to the archived log
+        anchor_git.publish(anchor2, str(remote), log=log2, trusted_keys=pub)
+    anchor_git.publish(anchor2, str(remote), log=log2, trusted_keys=pub, name="anchor-2.jsonl")
+    files = subprocess.run(["git", f"--git-dir={remote}", "ls-tree", "--name-only", "anchors"], capture_output=True, text=True).stdout
+    assert files.split() == ["anchor-2.jsonl", "anchor.jsonl"]  # both kept
+    for name, log in (("anchor.jsonl", log1), ("anchor-2.jsonl", log2)):  # each log checks against its own anchor
+        shown = subprocess.run(["git", f"--git-dir={remote}", "show", f"anchors:{name}"], capture_output=True, text=True).stdout
+        (tmp_path / "pub").write_text(shown, encoding="utf-8")
+        check = subprocess.run([sys.executable, str(ROOT / "verifier" / "ickverify.py"), str(log), "--anchor", str(tmp_path / "pub"),
+                                "--trusted-keys", str(pub), "--require-signatures"], capture_output=True, text=True)
+        assert check.returncode == 0 and check.stdout.startswith("VERIFIED"), check.stdout
+
+
+def test_the_benchmark_script_runs_and_reports(tmp_path):
+    from runtime.kernel import KernelError, find_binary
+
+    try:
+        binary = find_binary()
+    except KernelError:
+        pytest.skip("infinityctl not built")
+    done = subprocess.run([sys.executable, str(ROOT / "scripts" / "benchmark.py"), "--binary", binary, "--sizes", "1,20",
+                           "--repeat", "3", "--json"], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    report = json.loads(done.stdout)
+    assert report["no_log_ms"]["median"] > 0 and set(report["append_ms_by_log_length"]) == {"1", "20"}
