@@ -35,7 +35,7 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (169 pass)
+python -m pytest        # offline tests, no keys needed (209 pass)
 ```
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
@@ -207,8 +207,10 @@ NOVA_ICK_SERVICE=/run/ick/ick.sock python -m nova.api
   the published anchor and `watch`, not by the signature.
 - The key is still a file, on the service's machine. There is no hardware key or key store, and no
   revocation or "valid until" for keys.
-- Nothing starts or supervises the service for you (use systemd or similar), and Nova and the service must
-  be on the same machine (it is a Unix socket).
+- Nothing starts the service for you unless you install the files in `deploy/` (systemd units for the
+  signer, Nova and the anchor publisher, the accounts and directories they need, and an audit script; see
+  `deploy/README.md`). Those files have not been run under a booted systemd with real accounts. Nova and
+  the service must be on the same machine (it is a Unix socket).
 - Running it as root, or as the same user as Nova, gives none of this. The test only proves the separation
   when the two really are different accounts.
 
@@ -282,7 +284,7 @@ python -m runtime.anchor_git watch --anchor A.jsonl --repo <git url> --status-fi
   unnoticed), `anchor publishing failing (N in a row)`, `ANCHOR PUBLISH REFUSED (possible tampering)`, or
   `anchor has never been published`. Set the stale threshold to a few times your interval.
 
-Ways to run it (nothing starts it for you):
+Ways to run it (`deploy/` has a systemd unit and a cron file for this; nothing starts it unless you install them):
 
 ```cron
 # one-shot every 5 minutes; also records its status

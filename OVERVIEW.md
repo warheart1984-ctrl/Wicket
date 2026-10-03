@@ -30,6 +30,7 @@ every decision and outcome ──► receipt log, if one is configured (each ent
 | Piece | What it does | Lives in |
 |---|---|---|
 | **Signer service** (optional) | Runs the kernel, policy, key and log under another account; Nova asks over a Unix socket and holds none of them. | `runtime/ick_service.py` |
+| **Deployment files** | systemd units for the signer, Nova and the anchor publisher; the accounts and directories they need; `check_setup.py`, which audits the permissions that make the separation real. | `deploy/` |
 | **Standalone verifier** | One dependency-free Python file that re-checks a log, its anchor and its signatures without running the kernel, for a reader who does not want to trust our binary. | `verifier/ickverify.py` |
 | **ICK kernel** (Rust) | Judges a proposal: `allow`, `deny` or `await_human_approval`, and issues a hash-linked receipt, optionally signed with an Ed25519 key. Never calls a model. | `crates/`, `contracts/` |
 | **Receipt chain, outcomes, anchor** | Each entry includes the previous one's id, so editing one breaks the rest. After a model call an *outcome* entry is chained in, pointing at the `allow` that permitted it. The anchor records the log's length and head, which also catches deleted *newest* entries. | kernel CLI (`--log`, `--anchor`, `record-outcome`) |
@@ -81,14 +82,14 @@ Full instructions, settings and limits for each piece are in `README.md`.
 
 ## State of verification
 
-Tests: Rust 47, root Python 169, `nova-shell` 210 (+4 skipped). For the security-relevant rules, each
+Tests: Rust 47, root Python 209, `nova-shell` 210 (+4 skipped). For the security-relevant rules, each
 guard was removed in turn and a test failed. Run live against real Groq, NVIDIA and OpenRouter models:
 allow, deny, human approval, chained and anchored log, the operator screen in a real Chromium.
 
 **Not done / not verified:** publishing to a *hosted* git repo (tested with a local one); the
 local-model tool against a real Ollama or vLLM (tested with fakes); Windows file locking for the last use of an
 approval, and the key-file permission check (Unix only);
-the anchor publisher can run on a schedule (`watch`) and the operator screen shows how stale it is, but nothing starts it for you, it must run as a different user than Nova with push credentials Nova lacks, and it is untested against a hosted git service; the signing key can live in a separate signer service under another account (`runtime/ick_service.py`), but it is still a file (no key store or
+the anchor publisher can run on a schedule (`watch`) and the operator screen shows how stale it is, (`deploy/` has systemd units, the accounts and an audit script for it, run only in tests and checked with `systemd-analyze`, never under a booted systemd), it must run as a different user than Nova with push credentials Nova lacks, and it is untested against a hosted git service; the signing key can live in a separate signer service under another account (`runtime/ick_service.py`), but it is still a file (no key store or
 hardware key); no revocation or "valid until" for keys; all the JSON contracts are strict now, but they are only
 checked in tests (the kernel itself is more lenient than they are, by design). One full-suite failure was
 seen once and could not be reproduced in about 30 later runs (cause unknown).
