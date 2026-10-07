@@ -5,7 +5,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import executor_setup
 import pytest
+from runtime.witness import dispatch_https
 
 DEMO_POLICY = Path(__file__).resolve().parents[2] / "demo" / "policy.json"
 
@@ -153,9 +155,17 @@ def test_one_kernel_receipt_per_call_not_two(client, model, monkeypatch, tmp_pat
     except KernelRefusal:
         pytest.skip("infinityctl not built")
     log = tmp_path / "r.jsonl"
-    monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))
+    policy = tmp_path / "open.json"
+    # A provider chat is a POST, so the derived effect is write. This policy allows it.
+    policy.write_text(json.dumps({
+        "version": "infinity.policy.v1", "policy_id": "policy-open-v1",
+        "denied_effects": [], "effects_requiring_approval": [],
+    }))
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
     monkeypatch.setenv("NOVA_ICK_LOG", str(log))
-    assert client.post("/v1/chat", json=ASK).status_code == 200
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch_https):
+        response = client.post("/v1/chat", json=ASK)
+    assert response.status_code == 200, response.text
     entries = [json.loads(line) for line in log.read_text().splitlines()]
     decisions = [e for e in entries if "verdict" in e]
     # one decision (the adapter does not gate a second time), then the outcome of that one call
@@ -173,7 +183,7 @@ def test_a_denied_call_never_reaches_the_external_server(client, model, monkeypa
         pytest.skip("infinityctl not built")
     deny = tmp_path / "deny.json"
     deny.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-deny-v1",
-                                "denied_effects": ["read"], "effects_requiring_approval": []}))
+                                "denied_effects": ["read", "write"], "effects_requiring_approval": []}))
     monkeypatch.setenv("NOVA_ICK_POLICY", str(deny))
     response = client.post("/v1/chat", json=ASK)
     assert response.status_code == 403 and response.json()["error"]["code"] == "KERNEL_DENIED"
