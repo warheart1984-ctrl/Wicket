@@ -8,7 +8,7 @@ from uuid import uuid4
 from nova.errors import ProviderError
 from nova.receipts import make_receipt
 from runtime.call_binding import describe_https
-from .http import post_json
+from .http import post_json, refuse_unconfigured_model_http
 
 
 class ExternalProvider:
@@ -43,6 +43,7 @@ class ExternalProvider:
         return self._from_provider_json(governed_request, data)
 
     def chat_completion(self, governed_request: dict[str, Any]) -> dict[str, Any]:
+        refuse_unconfigured_model_http()
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         payload = {
             "model": self.model,

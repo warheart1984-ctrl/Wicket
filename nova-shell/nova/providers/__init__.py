@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from nova.ick import gate_provider
+
 from .provider_base import NovaProvider
 from .provider_external import ExternalProvider
 from .provider_local import LocalDeterministicProvider
@@ -9,8 +11,6 @@ from .provider_ollama import OllamaProvider
 
 
 def build_provider(config: dict[str, Any]) -> NovaProvider:
-    from nova.ick import gate_provider  # opt-in kernel gate; no-op unless NOVA_ICK_POLICY is set
-
     return gate_provider(_build_provider(config))
 
 

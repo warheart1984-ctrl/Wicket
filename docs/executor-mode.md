@@ -15,7 +15,8 @@ because nothing was sent.
 `WICKET_ALLOW_DIRECT_CALLS=1` is an explicit opt-out for local development. It is off when
 unset, and any other value is off. When it is exactly `1`, `run_turn` sends the provider call
 from this process and writes a warning to stderr every time. That path does not go through
-the witness and does not derive the call. Do not set it in a deploy unit, a systemd service,
+the witness and does not derive the call. The same variable is the only escape for Nova model
+HTTP, and only while Nova's policy is unset. Do not set it in a deploy unit, a systemd service,
 or a production environment.
 
 Gossip uses the same path as Nova's known-shape routes. Each peer gets a concrete
@@ -24,11 +25,21 @@ sends the call only after a matching allow. No allow, or no witness: the peer is
 contacted. `WICKET_ALLOW_DIRECT_CALLS` does not apply to gossip. An unknown shape is denied
 (`UNKNOWN_CALL_SHAPE`) and not sent.
 
-When Nova's kernel gate is on (`NOVA_ICK_POLICY` or `NOVA_ICK_SERVICE`), a known-shape
-provider call or local-model tool is sent by the witness or not sent at all. A provider
-chat is an HTTP POST, so the derived effect is `write`. A policy that allows only reads
-will not let that call through. Streaming a known-shape provider call is refused while the
-gate is on: the witness binds one request body, not a stream.
+Nova model HTTP sends nothing unless a policy and a witness are both configured. A policy is
+`NOVA_ICK_POLICY` or `NOVA_ICK_SERVICE`. A witness is `NOVA_ICK_WITNESS` (the socket of
+`python -m runtime.witness_service`) or the in-process witness tests install. With both of
+those policy variables unset, Nova does not call the provider client. A witness with no
+policy is not enough: there is no allow to check, so nothing is sent. A policy with no
+witness is the fail-closed path: nothing is sent. `WICKET_ALLOW_DIRECT_CALLS=1` is the only
+escape, and it does not apply once a policy is set. It warns on stderr every time, does not
+derive a `call_digest`, and does not let gossip skip an allow.
+
+When the policy and the witness are both configured, a known-shape provider call or
+local-model tool is sent by the witness. Effect, target, and `call_digest` are derived from
+the concrete call. A provider chat is an HTTP POST, so the derived effect is `write`. A
+policy that allows only reads will not let that call through. Streaming a known-shape
+provider call is refused while a witness would be required: the witness binds one request
+body, not a stream.
 
 A caller who can still reach the target without the witness is outside this control. That is a
 deployment limit (egress), not something this code enforces.
@@ -131,9 +142,10 @@ claim.
   split moves trust off Nova. It does not remove it.
 - **Egress.** The guarantee holds only when the target cannot be reached except through the
   witness. That restriction is deployment, not code.
-- **The local-dev opt-out.** `WICKET_ALLOW_DIRECT_CALLS=1` sends a runtime provider call with
-  no witness and no derived digest. It warns on stderr and is off by default. It does not
-  let gossip skip an allow.
+- **The local-dev opt-out.** `WICKET_ALLOW_DIRECT_CALLS=1` sends a runtime provider call, or
+  a Nova model HTTP call while Nova's policy is unset, with no witness and no derived digest.
+  It warns on stderr on every use and is off by default. Any other value is off. It does not
+  let gossip skip an allow, and it does not bypass a Nova policy that is already set.
 - **A runtime allow with no witness.** `run_turn` can record an allow for its own description
   and then not call the provider. That receipt has no outcome. It is not a send, and it is
   not a derived binding.

@@ -68,6 +68,9 @@ def client(tmp_path, monkeypatch, model):
     monkeypatch.setenv("NOVA_NODE_RUNTIME_DIR", str(tmp_path / "node"))
     monkeypatch.setattr(nova.audit, "AUDIT_PATH", tmp_path / "nova-audit.log")
     monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.delenv("NOVA_ICK_WITNESS", raising=False)
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
     monkeypatch.setenv("NOVA_PROVIDER", "external")
     monkeypatch.setenv("NOVA_EXTERNAL_URL", model.url)
     monkeypatch.setenv("NOVA_EXTERNAL_API_KEY", "secret-key")
@@ -78,7 +81,8 @@ def client(tmp_path, monkeypatch, model):
 ASK = {"prompt": "What is the capital of France?"}
 
 
-def test_v1_chat_answers_through_the_external_provider(client, model):
+def test_v1_chat_answers_through_the_external_provider(client, model, monkeypatch):
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     response = client.post("/v1/chat", json=ASK)
     assert response.status_code == 200, response.text
     body = response.json()
@@ -92,7 +96,8 @@ def test_v1_chat_answers_through_the_external_provider(client, model):
     assert seen["body"]["messages"][1]["content"] == ASK["prompt"]
 
 
-def test_the_sibling_route_still_works_with_the_same_settings(client, model):
+def test_the_sibling_route_still_works_with_the_same_settings(client, model, monkeypatch):
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     body = {"model": "x", "messages": [{"role": "user", "content": "hi"}]}
     assert client.post("/v1/chat/completions", json=body).status_code == 200
 
@@ -120,14 +125,16 @@ def test_an_unknown_provider_is_a_clear_error_not_a_crash(client, monkeypatch):
     assert response.json()["error"]["code"] == "PROVIDER_UNSUPPORTED"
 
 
-def test_a_failing_external_server_is_a_json_error(client, model):
+def test_a_failing_external_server_is_a_json_error(client, model, monkeypatch):
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     model.mode = "http500"
     response = client.post("/v1/chat", json=ASK)
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "PROVIDER_HTTP_ERROR"
 
 
-def test_an_empty_reply_is_an_error_not_a_blank_answer(client, model):
+def test_an_empty_reply_is_an_error_not_a_blank_answer(client, model, monkeypatch):
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     model.mode = "empty"
     response = client.post("/v1/chat", json=ASK)
     assert response.status_code == 500
@@ -135,6 +142,7 @@ def test_an_empty_reply_is_an_error_not_a_blank_answer(client, model):
 
 
 def test_the_provider_can_come_from_the_config_file(client, model, monkeypatch, tmp_path):
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     config = tmp_path / "nova-config.json"
     config.write_text(json.dumps({"provider": "external", "external_url": model.url,
                                   "external_api_key": "from-file", "external_model": "file-model"}))

@@ -8,7 +8,7 @@ from uuid import uuid4
 from nova.errors import ProviderError
 from nova.receipts import make_receipt
 from runtime.call_binding import describe_https
-from .http import post_json, post_json_lines
+from .http import post_json, post_json_lines, refuse_unconfigured_model_http
 
 
 class OllamaProvider:
@@ -45,6 +45,7 @@ class OllamaProvider:
         return self._from_provider_json(governed_request, data)
 
     def chat_completion(self, governed_request: dict[str, Any]) -> dict[str, Any]:
+        refuse_unconfigured_model_http()
         payload = self._payload(governed_request, stream=False)
         try:
             data = post_json(self._ollama_url(), payload, timeout=self.timeout)
@@ -73,6 +74,7 @@ class OllamaProvider:
         return {"completion": completion, "receipt": receipt}
 
     def chat_completion_stream(self, governed_request: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        refuse_unconfigured_model_http()
         payload = self._payload(governed_request, stream=True)
         stream_id = f"ollama-stream-{uuid4()}"
         created = int(time.time())

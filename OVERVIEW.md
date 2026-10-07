@@ -34,7 +34,7 @@ every decision and outcome ──► receipt log, if one is configured (each ent
 | **Standalone verifier** | One dependency-free Python file that re-checks a log, its anchor and its signatures without running the kernel, for a reader who does not want to trust our binary. | `verifier/ickverify.py` |
 | **ICK kernel** (Rust) | Judges a proposal: `allow`, `deny` or `await_human_approval`, and issues a hash-linked receipt, optionally signed with an Ed25519 key. Never calls a model. | `crates/`, `contracts/` |
 | **Receipt chain, outcomes, anchor** | Each entry includes the previous one's id, so editing one breaks the rest. After a model call an *outcome* entry is chained in, pointing at the `allow` that permitted it. The anchor records the log's length and head, which also catches deleted *newest* entries. | kernel CLI (`--log`, `--anchor`, `record-outcome`) |
-| **Nova shell** (Python) | The model-facing API (OpenAI-style) and CLI. Asks the kernel before every model call when `NOVA_ICK_POLICY` is set; fails closed if the kernel is missing. | `nova-shell/` |
+| **Nova shell** (Python) | The model-facing API (OpenAI-style) and CLI. Model HTTP is sent only when a policy (`NOVA_ICK_POLICY` or `NOVA_ICK_SERVICE`) and a witness are both configured. With both policy variables unset, the provider client is not called. | `nova-shell/` |
 | **Human approvals** | A held request is parked with a hash; a person approves or denies that exact request (approval: expiry, use limit; denial: final); undecided requests expire after 7 days. The kernel's answer is always final. | `nova-shell/nova/ick_approvals.py` |
 | **Operator screen** | Pending requests with Approve and Deny buttons, log status, recent receipts. Localhost only, token-protected, strict CSP. | `nova-shell/nova/operator_ui.py` |
 | **Anchor publisher** | `publish` / `verify` against a separate git repo; never force-pushes. | `runtime/anchor_git.py` |
@@ -66,7 +66,7 @@ The full version, including who the system does not stop, is `THREAT_MODEL.md`. 
 - **Trust assumptions (these are yours to set up):**
   the approvals file must be writable only by the human operator, not by the Nova server;
   the anchor repository must be outside the log writer's control;
-  the gate is **opt-in** (off unless `NOVA_ICK_POLICY` is set);
+  Nova model HTTP is sent only when a policy and a witness are both configured (with both policy variables unset, nothing is sent; `WICKET_ALLOW_DIRECT_CALLS=1` is a local-dev opt-out that warns on every use);
   the operator token is the only login; someone who can edit Nova's code can bypass the gate.
 
 ## Try it
@@ -91,7 +91,7 @@ local-model tool against a real Ollama or vLLM (tested with fakes); the key-file
 every decision re-checks the whole log, so it gets slower as the log grows (about 12 ms per 100 entries,
 ~120 ms at 1,000 entries; archive and start a fresh log, see `deploy/README.md`);
 the anchor publisher can run on a schedule (`watch`) and the operator screen shows how stale it is, (`deploy/` has systemd units, the accounts and an audit script for it, checked with `systemd-analyze`, in tests, and by one full run of `deploy/smoke-test.sh` on a Linux Mint machine with real accounts), it must run as a different user than Nova with push credentials Nova lacks, and it is untested against a hosted git service; executor mode (`docs/executor-mode.md`, `runtime/witness.py`) binds a concrete call to an allow and
-dispatches it from a witness Nova does not hold the key for; when Nova's gate is on, provider HTTP and the local-model tool go through that witness or are not sent; `run_turn` and gossip do not send without a witness (`WICKET_ALLOW_DIRECT_CALLS=1` is a local-dev opt-out for the runtime only, off by default); it does not prove observed effect, and observer mode, `state_ref`, retries, heartbeat, and a two-account probe are not built; the signing key can live in a separate signer service under another account (`runtime/ick_service.py`), but it is still a file (no key store or
+dispatches it from a witness Nova does not hold the key for; Nova model HTTP sends nothing unless a policy and a witness are configured, and then provider HTTP and the local-model tool go through that witness with a derived `call_digest`; `run_turn` and gossip do not send without a witness (`WICKET_ALLOW_DIRECT_CALLS=1` is a local-dev opt-out for the runtime and for Nova model HTTP while the policy is unset, off by default, and it warns on every use; it does not apply to gossip); it does not prove observed effect, and observer mode, `state_ref`, retries, heartbeat, and a two-account probe are not built; the signing key can live in a separate signer service under another account (`runtime/ick_service.py`), but it is still a file (no key store or
 hardware key); a key can be retired or revoked by position in the log (not by date, and the signer is not told); all the JSON contracts are strict now, but they are only
 checked in tests (the kernel itself is more lenient than they are, by design). One full-suite failure was
 seen once and could not be reproduced in about 30 later runs (cause unknown).

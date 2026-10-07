@@ -39,6 +39,7 @@ from nova.node import submit as node_submit_routes
 from nova.node import substrate_events as node_substrate_event_routes
 from nova.node.tools import routes as node_tool_routes
 from nova.providers import build_provider as _registry_build_provider
+from nova.providers.http import begin_direct_model_http
 
 
 @dataclass(frozen=True)
@@ -109,8 +110,7 @@ class OllamaChatProvider:
         max_tokens: int,
         temperature: float,
     ) -> ProviderResponse:
-        if (os.environ.get("NOVA_ICK_POLICY") or "").strip() or (os.environ.get("NOVA_ICK_SERVICE") or "").strip():
-            raise RuntimeError("the gate is on; this Ollama call is sent by the witness, not by Nova")
+        begin_direct_model_http()
         payload = {
             "model": model,
             "messages": messages,

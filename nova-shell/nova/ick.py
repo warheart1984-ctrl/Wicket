@@ -1,14 +1,26 @@
 """Ask the ICK kernel (`infinityctl`) before Nova calls a model.
 
-Opt-in: set NOVA_ICK_POLICY to a policy file to switch the gate on. Optional:
-NOVA_ICK_BIN (path to infinityctl), NOVA_ICK_LOG (chained receipt log) and
-NOVA_ICK_ANCHOR (anchor file, needs NOVA_ICK_LOG).
+Nova's model HTTP sends nothing unless a policy and a witness are both configured.
+A policy is NOVA_ICK_POLICY (a policy file) or NOVA_ICK_SERVICE (the socket of a signer
+service, runtime/ick_service.py). A witness is NOVA_ICK_WITNESS (the socket of
+`python -m runtime.witness_service`) or the in-process witness tests install. With the
+policy unset, the provider client is not called, even if a witness is configured: a
+witness without an allow is not enough. With the policy set and the witness missing,
+the call is not sent.
 
-Or set NOVA_ICK_SERVICE to the socket of a signer service (runtime/ick_service.py). Then the
-kernel runs in that other process, with its own policy, key and log, and Nova holds none of them.
+Optional with NOVA_ICK_POLICY: NOVA_ICK_BIN (path to infinityctl), NOVA_ICK_LOG (chained
+receipt log) and NOVA_ICK_ANCHOR (anchor file, needs NOVA_ICK_LOG). With NOVA_ICK_SERVICE
+the kernel runs in that other process, with its own policy, key and log, and Nova holds
+none of them.
 
-The gate fails closed: once it is on, a missing binary, a kernel error or any verdict other
-than `allow` stops the model call. Message text is never sent to the kernel, only sizes.
+WICKET_ALLOW_DIRECT_CALLS=1 is the only escape, and only while the policy is unset. It
+is off unless the value is exactly ``1``. It warns on stderr every time, does not derive
+a call digest, and does not apply to gossip. Do not set it in a deploy unit.
+
+The gate fails closed: once it is on, a missing binary, a kernel error, a missing witness,
+or any verdict other than `allow` stops the model call. Message text is never sent to the
+kernel, only sizes. Streaming a known-shape provider call is refused while a witness would
+be required: the witness binds one body, not a stream.
 """
 
 from __future__ import annotations
@@ -619,6 +631,10 @@ def gate_outcome(
 
 
 def gate_provider(provider: Any) -> Any:
-    """Wrap `provider` if the gate is switched on in the environment."""
+    """Wrap `provider` when a policy or a signer service is configured.
+
+    With neither, the provider is returned as it is. Its model HTTP client still sends
+    nothing unless ``WICKET_ALLOW_DIRECT_CALLS`` is exactly ``1``.
+    """
     gate = IckGate.from_env()
     return IckGatedProvider(provider, gate) if gate else provider

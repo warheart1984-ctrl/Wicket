@@ -71,13 +71,19 @@ These are real limits, not fine print.
    concrete `call`, derives effect and target and fills in `call_digest`; a disagreement or an
    unknown shape is a deny (`tests/test_execution_binding.py`). The witness recomputes the digest,
    requires a chained unused unexpired allow for that digest, consumes the allow, and only then
-   sends the call. A different call is refused and recorded as `mismatch`. Provider HTTP and the
-   local-model tool go through that witness or are not sent (`tests/test_witness_gate.py`).
+   sends the call. A different call is refused and recorded as `mismatch`. Nova model HTTP sends
+   nothing unless a policy (`NOVA_ICK_POLICY` or `NOVA_ICK_SERVICE`) and a witness are both
+   configured. With both policy variables unset, Nova does not call the provider client. When
+   both are set, provider HTTP and the local-model tool go through that witness, and the receipt
+   keeps the `call_digest` derived from the concrete call
+   (`tests/test_witness_gate.py`, `nova-shell/tests/test_model_http_default.py`).
    `ickverify.py` recomputes `call_digest` when given the concrete call and joins the witness log.
    This is not observed-effect proof. `infinityctl evaluate` without the signer still trusts the
    caller's description. `run_turn` and `python -m runtime` do not call the provider unless a
-   witness does, or `WICKET_ALLOW_DIRECT_CALLS=1` is set (local dev only; it warns on stderr
-   and is off by default). Gossip is a derived `https_request` sent by the witness, or it is
+   witness does, or `WICKET_ALLOW_DIRECT_CALLS=1` is set. That same opt-out is the only escape
+   for Nova model HTTP, and only while the policy is unset (local dev only; it warns on stderr
+   every use and is off by default; it does not derive a digest and it does not apply to gossip).
+   Gossip is a derived `https_request` sent by the witness, or it is
    not sent; an unknown shape is `UNKNOWN_CALL_SHAPE`. See `docs/executor-mode.md`.
 1a. **Who is asking is not checked.** Every proposal has an `actor`, but the kernel never reads it and no policy
    rule can mention it: it is recorded and hashed (so it cannot be edited later), not enforced, and not

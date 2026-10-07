@@ -4,8 +4,8 @@ import json
 import os
 import urllib.request
 
-from nova.errors import ProviderError
 from nova.ick import IckGate, KernelRefusal, gate_outcome
+from nova.providers.http import begin_direct_model_http, refuse_unconfigured_model_http
 
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -26,6 +26,7 @@ def generate(
     active_model = model or DEFAULT_CODER_MODEL
     gate = IckGate.from_env()
     if gate is None:
+        refuse_unconfigured_model_http()
         return _direct(prompt, active_model, temperature, max_tokens)
     if tool not in _READ_TOOLS and tool not in _WRITE_TOOLS:
         raise KernelRefusal(code="UNKNOWN_CALL_SHAPE", message=f"tool {tool!r} is not a known local model tool")
@@ -84,11 +85,7 @@ def _vllm_generate(prompt: str, model: str, temperature: float, max_tokens: int)
 
 
 def _post_json(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
-    if (os.environ.get("NOVA_ICK_POLICY") or "").strip() or (os.environ.get("NOVA_ICK_SERVICE") or "").strip():
-        raise ProviderError(
-            code="WITNESS_REQUIRED",
-            message="the gate is on; the local model tool is sent by the witness, not by this client",
-        )
+    begin_direct_model_http()
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
