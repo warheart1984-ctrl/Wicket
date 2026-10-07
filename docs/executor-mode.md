@@ -1,18 +1,37 @@
 # Executor mode
 
-Executor mode is the witness in `runtime/witness.py`. Nova hands it a concrete call and an allow
-receipt id. The witness decides whether that call may run, and it is the component that performs
-the call. When Nova's gate is on (`NOVA_ICK_POLICY` or `NOVA_ICK_SERVICE`), a known shape is sent
-by the witness or not sent at all. Nova does not hold the witness signing key: `NOVA_ICK_WITNESS`
-is the socket of `python -m runtime.witness_service`, which owns that key and the witness log.
-A provider chat is an HTTP POST, so the derived effect is `write`. A policy that allows only
-reads will not let that call through.
+Executor mode is the witness in `runtime/witness.py`. The caller hands it a concrete call and an
+allow receipt id. The witness decides whether that call may run, and it is the component that
+performs the call. Nova does not hold the witness signing key: `NOVA_ICK_WITNESS` is the socket
+of `python -m runtime.witness_service`, which owns that key and the witness log.
+
+The witness requirement is on by default. You do not set `NOVA_ICK_POLICY` to turn it on. A
+known-shape provider call from `run_turn` or `python -m runtime` is sent by a witness or not
+sent at all. With no witness configured, the provider client is not called. The kernel may
+still record a decision. On that path the proposal is the runtime's own description (effect
+`read`, target the provider name), not a derived `call_digest`, and there is no outcome
+because nothing was sent.
+
+`WICKET_ALLOW_DIRECT_CALLS=1` is an explicit opt-out for local development. It is off when
+unset, and any other value is off. When it is exactly `1`, `run_turn` sends the provider call
+from this process and writes a warning to stderr every time. That path does not go through
+the witness and does not derive the call. Do not set it in a deploy unit, a systemd service,
+or a production environment.
+
+Gossip uses the same path as Nova's known-shape routes. Each peer gets a concrete
+`https_request`, and effect, target, and `call_digest` are derived from it. The witness
+sends the call only after a matching allow. No allow, or no witness: the peer is not
+contacted. `WICKET_ALLOW_DIRECT_CALLS` does not apply to gossip. An unknown shape is denied
+(`UNKNOWN_CALL_SHAPE`) and not sent.
+
+When Nova's kernel gate is on (`NOVA_ICK_POLICY` or `NOVA_ICK_SERVICE`), a known-shape
+provider call or local-model tool is sent by the witness or not sent at all. A provider
+chat is an HTTP POST, so the derived effect is `write`. A policy that allows only reads
+will not let that call through. Streaming a known-shape provider call is refused while the
+gate is on: the witness binds one request body, not a stream.
 
 A caller who can still reach the target without the witness is outside this control. That is a
-deployment limit (egress), not something this code enforces. Gossip between nodes is still the
-older description-only gate. `python -m runtime` still calls the provider after the kernel allows
-it, unless `run_turn` is given a witness. Streaming a known-shape provider call is refused while
-the gate is on: the witness binds one request body, not a stream.
+deployment limit (egress), not something this code enforces.
 
 ## What it checks
 
@@ -112,5 +131,9 @@ claim.
   split moves trust off Nova. It does not remove it.
 - **Egress.** The guarantee holds only when the target cannot be reached except through the
   witness. That restriction is deployment, not code.
-- **The runtime CLI.** `run_turn` without a witness still calls the provider. Nova's gate does not.
-- **Gossip.** Peer gossip is not a shape this wiring sends through the witness.
+- **The local-dev opt-out.** `WICKET_ALLOW_DIRECT_CALLS=1` sends a runtime provider call with
+  no witness and no derived digest. It warns on stderr and is off by default. It does not
+  let gossip skip an allow.
+- **A runtime allow with no witness.** `run_turn` can record an allow for its own description
+  and then not call the provider. That receipt has no outcome. It is not a send, and it is
+  not a derived binding.

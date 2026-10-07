@@ -75,8 +75,10 @@ These are real limits, not fine print.
    local-model tool go through that witness or are not sent (`tests/test_witness_gate.py`).
    `ickverify.py` recomputes `call_digest` when given the concrete call and joins the witness log.
    This is not observed-effect proof. `infinityctl evaluate` without the signer still trusts the
-   caller's description. Gossip and `python -m runtime` without a witness are not on this path.
-   See `docs/executor-mode.md`.
+   caller's description. `run_turn` and `python -m runtime` do not call the provider unless a
+   witness does, or `WICKET_ALLOW_DIRECT_CALLS=1` is set (local dev only; it warns on stderr
+   and is off by default). Gossip is a derived `https_request` sent by the witness, or it is
+   not sent; an unknown shape is `UNKNOWN_CALL_SHAPE`. See `docs/executor-mode.md`.
 1a. **Who is asking is not checked.** Every proposal has an `actor`, but the kernel never reads it and no policy
    rule can mention it: it is recorded and hashed (so it cannot be edited later), not enforced, and not
    authenticated. Nova names the path that is asking (`nova-shell/model-provider`, `nova-shell/local-model-tool`,

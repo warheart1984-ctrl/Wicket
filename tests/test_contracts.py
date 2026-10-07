@@ -32,6 +32,7 @@ class FakeClient:
 @pytest.fixture
 def log_entries(tmp_path, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     log = tmp_path / "r.jsonl"
     kernel = Kernel(receipt_log=log)
     run_turn("hi", "groq", kernel, client=FakeClient())
@@ -87,6 +88,7 @@ import subprocess  # noqa: E402
 
 def test_signed_entries_and_anchor_records_match_their_contracts(tmp_path, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     binary = find_binary()
     private, public = tmp_path / "k.priv", tmp_path / "k.pub"
     subprocess.run([binary, "keygen", "--out", str(private), "--public-out", str(public)], check=True,

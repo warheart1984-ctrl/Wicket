@@ -37,8 +37,13 @@ a proposal and sent to the kernel first. The model is called only if the kernel 
 ```bash
 cargo build
 GROQ_API_KEY=... python -m runtime "What is the capital of France?" --provider groq
-python -m pytest        # offline tests, no keys needed (246 pass)
+python -m pytest        # offline tests, no keys needed
 ```
+
+`python -m runtime` asks the kernel and does not call the provider unless a witness performs
+the call. `WICKET_ALLOW_DIRECT_CALLS=1` is a local-development opt-out: it sends from this
+process and prints a warning on stderr every time. It is off when unset. Do not set it on a
+deployed service.
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
 `OPENROUTER_API_KEY`; models can be overridden with `INFINITY_<NAME>_MODEL`).
@@ -269,7 +274,10 @@ NOVA_ICK_SERVICE=/run/ick/ick.sock python -m nova.api
   effect and target for a known shape and denies a disagreement. It still does not perform the call.
   Executor mode (`docs/executor-mode.md`) is a separate witness, with its own key, that performs the
   call after checking the allow. When Nova's gate is on, provider HTTP and the local-model tool go
-  through that witness (`NOVA_ICK_WITNESS`) or are not sent. Outcomes ("completed", the hashes) on
+  through that witness (`NOVA_ICK_WITNESS`) or are not sent. `run_turn` and `python -m runtime`
+  do not call the provider without a witness (the local-dev opt-out is `WICKET_ALLOW_DIRECT_CALLS=1`,
+  off by default, and it warns on stderr). Gossip is sent by that witness from a derived call, or
+  not sent. Outcomes ("completed", the hashes) on
   the receipt log remain Nova's claim, signed and chained. This is not observed-effect proof.
 - Nova can still stop asking, or stop the service from being reachable. Rollback and silence are caught by
   the published anchor and `watch`, not by the signature.
@@ -413,7 +421,8 @@ because Groq rejects Python's default one.
 ### Nova asks the kernel first
 
 Set `NOVA_ICK_POLICY` to a policy file and Nova asks the ICK kernel before it calls a
-model; with it unset nothing changes. Optional: `NOVA_ICK_BIN`, `NOVA_ICK_LOG` (chained
+model; with it unset, those model calls are unchanged. Gossip does not send unless that
+gate produces a matching allow and a witness performs the call. Optional: `NOVA_ICK_BIN`, `NOVA_ICK_LOG` (chained
 receipt log) and `NOVA_ICK_ANCHOR` (needs the log). To keep the key and log away from Nova entirely, set
 `NOVA_ICK_SERVICE` instead (see the signer service).
 
@@ -438,8 +447,10 @@ python -m nova.api
   - the Ollama path behind `/v1/chat` (the async `invoke` call);
   - the node's local-model tool (`/node/tool`: code, wire, explain), checked once per
     call, which covers both the Ollama attempt and the vLLM fallback;
-  - node gossip to peers (`gossip_to_peers`), checked once per peer as a `write`. A peer
-    that is refused shows `status: "refused"` in the results and nothing is sent.
+  - node gossip to peers (`gossip_to_peers`), one derived `https_request` per peer. Effect,
+    target, and `call_digest` come from that call. The witness sends it only after a matching
+    allow. A peer that is refused shows `status: "refused"` and nothing is sent. An unknown
+    shape is `UNKNOWN_CALL_SHAPE`. With no policy and no witness, nothing is sent.
 - Any refusal on any route becomes HTTP 403 through one app-wide handler, never a 500.
 - Gossip is a `write`, and the demo policy requires approval for writes, so with
   `demo/policy.json` gossip waits until a human approves it (see below), or until you use

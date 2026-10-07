@@ -238,49 +238,97 @@ def _gossip_setup(monkeypatch, tmp_path):
     from nova.node import federation
 
     sent = []
-
-    class Response:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
     monkeypatch.setattr(federation, "load_peers", lambda: [
         {"peer_id": "p1", "endpoint": "http://peer-one.test"},
         {"peer_id": "p2", "endpoint": "http://peer-two.test"}])
     monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
-    monkeypatch.setattr(federation.urllib.request, "urlopen",
-                        lambda request, timeout=None: sent.append(request.full_url) or Response())
     return federation, sent
 
 
 def test_gossip_waits_for_approval_under_the_demo_policy(monkeypatch, tmp_path):
     federation, sent = _gossip_setup(monkeypatch, tmp_path)
     monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))  # writes need approval
-    results = federation.gossip_to_peers()
+    monkeypatch.delenv("NOVA_ICK_WITNESS", raising=False)
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
+
+    def dispatch(bound):
+        sent.append(bound.url)
+        return b"{}"
+
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+        results = federation.gossip_to_peers()
     assert [r["status"] for r in results] == ["refused", "refused"]
     assert results[0]["error"] == "KERNEL_AWAITING_APPROVAL"
     assert sent == []  # nothing left the node
 
 
-def test_gossip_goes_out_when_the_policy_allows_writes(monkeypatch, tmp_path):
+def test_gossip_goes_out_only_through_the_witness_when_the_policy_allows_writes(monkeypatch, tmp_path):
     federation, sent = _gossip_setup(monkeypatch, tmp_path)
     policy = tmp_path / "open.json"
     policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-open-v1",
                                   "denied_effects": [], "effects_requiring_approval": []}))
     monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
-    results = federation.gossip_to_peers()
-    assert [r["status"] for r in results] == [200, 200]
-    assert sent == ["http://peer-one.test/node/gossip", "http://peer-two.test/node/gossip"]
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
+    blocked = federation.gossip_to_peers()
+    assert [r["status"] for r in blocked] == ["refused", "refused"]
+    assert blocked[0]["error"] == "WITNESS_UNAVAILABLE"
+    assert sent == []
+
+    def dispatch(bound):
+        assert bound.kind == "https_request" and bound.method == "POST"
+        sent.append(bound.url)
+        return b"{}"
+
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+        results = federation.gossip_to_peers()
+    assert [r["status"] for r in results] == ["sent", "sent"]
+    assert sent == [
+        "http://peer-one.test:80/node/gossip",
+        "http://peer-two.test:80/node/gossip",
+    ]
 
 
-def test_gossip_is_unchanged_when_the_gate_is_off(monkeypatch, tmp_path):
+def test_gossip_sends_nothing_when_there_is_no_allow(monkeypatch, tmp_path):
     federation, sent = _gossip_setup(monkeypatch, tmp_path)
     monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
-    assert [r["status"] for r in federation.gossip_to_peers()] == [200, 200] and len(sent) == 2
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.delenv("NOVA_ICK_WITNESS", raising=False)
+    # The runtime opt-out must not let gossip skip the allow.
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
+
+    def dispatch(bound):
+        sent.append(bound.url)
+        return b"{}"
+
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+        results = federation.gossip_to_peers()
+    assert [r["status"] for r in results] == ["refused", "refused"]
+    assert results[0]["error"] == "WITNESS_UNAVAILABLE"
+    assert sent == []
+
+
+def test_gossip_denies_an_unknown_shape_and_does_not_send(monkeypatch, tmp_path):
+    from nova.node import federation
+
+    sent = []
+    monkeypatch.setattr(federation, "load_peers", lambda: [{"peer_id": "v6", "endpoint": "http://[::1]"}])
+    monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
+    policy = tmp_path / "open.json"
+    policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-open-v1",
+                                  "denied_effects": [], "effects_requiring_approval": []}))
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
+
+    def dispatch(bound):
+        sent.append(bound.url)
+        return b"{}"
+
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+        results = federation.gossip_to_peers()
+    assert results == [{"peer_id": "v6", "status": "refused", "error": "UNKNOWN_CALL_SHAPE"}]
+    assert sent == []
+    text = (tmp_path / "receipts.jsonl").read_text(encoding="utf-8")
+    assert "UNKNOWN_CALL_SHAPE" in text
 
 
 def test_async_invoke_path_is_gated(deny_policy):
@@ -354,15 +402,11 @@ def test_each_path_through_the_gate_names_itself_as_the_actor(monkeypatch, tmp_p
     monkeypatch.setattr(local_model, "_ollama_generate", lambda *a, **k: "text")
     with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
         local_model.generate("hello")
-    # 3. gossip
-    class Response:
-        status = 200
-        def __enter__(self): return self
-        def __exit__(self, *exc): return False
+    # 3. gossip (the kernel is asked with the derived call; without a witness nothing is sent)
     monkeypatch.setattr(federation, "load_peers", lambda: [{"peer_id": "p1", "endpoint": "http://peer.test"}])
     monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
-    monkeypatch.setattr(federation.urllib.request, "urlopen", lambda request, timeout=None: Response())
-    federation.gossip_to_peers()
+    refused = federation.gossip_to_peers()
+    assert refused[0]["status"] == "refused" and refused[0]["error"] == "WITNESS_UNAVAILABLE"
 
     ids = [actor["id"] for _, actor in seen]
     assert sorted(ids) == sorted(["nova-shell/model-provider", "nova-shell/local-model-tool", "nova-shell/gossip"])

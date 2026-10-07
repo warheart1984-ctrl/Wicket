@@ -33,6 +33,8 @@ class FakeClient:
 @pytest.fixture(autouse=True)
 def keys(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
+    # These tests need a completed provider call. Explicit local-dev opt-out, not the default.
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
 
 
 @pytest.fixture

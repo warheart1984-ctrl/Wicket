@@ -175,31 +175,25 @@ def test_the_local_model_tool_records_an_outcome(monkeypatch, paths):
 
 
 def test_gossip_records_whether_each_send_worked(monkeypatch, paths):
-    import urllib.error
-
     from nova.node import federation
 
-    class Ok:
-        status = 200
-        def __enter__(self): return self
-        def __exit__(self, *e): return False
-
-    def urlopen(request, timeout=None):
-        if "down" in request.full_url:
-            raise urllib.error.URLError("unreachable")
-        return Ok()
+    def dispatch(bound):
+        if "down.test" in bound.url:
+            raise OSError("unreachable")
+        return b"ok"
 
     policy = paths["dir"] / "open.json"
     policy.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-open-v1",
                                   "denied_effects": [], "effects_requiring_approval": []}))
     monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
     monkeypatch.setenv("NOVA_ICK_LOG", str(paths["log"]))
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
     monkeypatch.setattr(federation, "load_peers", lambda: [{"peer_id": "a", "endpoint": "http://up.test"},
                                                           {"peer_id": "b", "endpoint": "http://down.test"}])
     monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
-    monkeypatch.setattr(federation.urllib.request, "urlopen", urlopen)
-    results = federation.gossip_to_peers()
-    assert [r["status"] for r in results] == [200, "error"]
+    with executor_setup.install_witness(monkeypatch, paths["dir"], dispatch):
+        results = federation.gossip_to_peers()
+    assert [r["status"] for r in results] == ["sent", "error"]
     assert [e["status"] for e in entries(paths) if "status" in e] == ["completed", "failed"]
 
 

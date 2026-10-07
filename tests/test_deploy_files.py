@@ -210,10 +210,12 @@ def test_the_publisher_unit_command_runs_one_real_publish(tmp_path):
             return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
 
     os.environ["GROQ_API_KEY"] = "k"
+    os.environ["WICKET_ALLOW_DIRECT_CALLS"] = "1"
     try:
         run_turn("hi", "groq", Kernel(policy, log, binary=binary, anchor=anchor, sign_key=key), client=Client())
     finally:
         del os.environ["GROQ_API_KEY"]
+        del os.environ["WICKET_ALLOW_DIRECT_CALLS"]
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
     status = tmp_path / "status.json"
@@ -502,10 +504,12 @@ def test_the_published_anchor_is_on_the_anchors_branch_even_when_the_repository_
             return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
 
     os.environ["GROQ_API_KEY"] = "k"
+    os.environ["WICKET_ALLOW_DIRECT_CALLS"] = "1"
     try:
         run_turn("hi", "groq", Kernel(policy, log, binary=binary, anchor=anchor, sign_key=key), client=Client())
     finally:
         del os.environ["GROQ_API_KEY"]
+        del os.environ["WICKET_ALLOW_DIRECT_CALLS"]
     remote = tmp_path / "r.git"
     subprocess.run(["git", "-c", "init.defaultBranch=master", "init", "--bare", "-q", str(remote)], check=True)
     anchor_git.publish(anchor, str(remote), log=log)
@@ -549,12 +553,14 @@ def test_the_smoke_test_key_switch_helpers_do_what_the_live_run_relies_on(tmp_pa
             return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
 
     os.environ["GROQ_API_KEY"] = "k"
+    os.environ["WICKET_ALLOW_DIRECT_CALLS"] = "1"
     try:
         run_turn("before", "groq", Kernel(policy, log, binary=binary, anchor=anchor, sign_key=keys["old"][0]), client=Client())
         limit_expected = json.loads(log.read_text().splitlines()[-1])["receipt_id"]
         run_turn("after", "groq", Kernel(policy, log, binary=binary, anchor=anchor, sign_key=keys["new"][0]), client=Client())
     finally:
         del os.environ["GROQ_API_KEY"]
+        del os.environ["WICKET_ALLOW_DIRECT_CALLS"]
 
     def sh(script, **extra):
         env = {**os.environ, "SMOKE_SOURCE_ONLY": "1", "CTL": binary, "PREFIX": str(ROOT),
@@ -628,11 +634,13 @@ def test_rotating_the_log_needs_a_new_published_name_and_keeps_the_old_evidence(
         log, anchor = tmp_path / log_name, tmp_path / anchor_name
         kernel = Kernel(policy, log, binary=binary, anchor=anchor, sign_key=key)
         os.environ["GROQ_API_KEY"] = "k"
+        os.environ["WICKET_ALLOW_DIRECT_CALLS"] = "1"
         try:
             for i in range(turns):
                 run_turn(f"t{i}", "groq", kernel, client=Client())
         finally:
             del os.environ["GROQ_API_KEY"]
+            del os.environ["WICKET_ALLOW_DIRECT_CALLS"]
         return log, anchor
 
     log1, anchor1 = run("log1.jsonl", "a1.jsonl", 2)

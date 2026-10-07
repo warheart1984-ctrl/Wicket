@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import pytest
 
+from runtime.__main__ import main
 from runtime.call_binding import derive
-from runtime.chat import run_turn
+from runtime.chat import direct_calls_allowed, run_turn
 from runtime.kernel import Kernel, KernelError, find_binary
 from runtime.witness import Witness
 from tests.test_execution_binding import keygen
@@ -78,3 +79,73 @@ def test_run_turn_does_not_call_the_provider_unless_the_witness_dispatches(tmp_p
     assert len(client.calls) == 1
     assert client.calls[0][0].startswith("https://api.groq.com")
     assert (tmp_path / "witness.jsonl").read_text(encoding="utf-8").count('"started"') == 1
+
+
+def _open_kernel(tmp_path):
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({
+        "version": "infinity.policy.v1",
+        "policy_id": "policy-open-v1",
+        "denied_effects": [],
+        "effects_requiring_approval": [],
+    }))
+    return Kernel(policy, tmp_path / "receipts.jsonl", binary=BINARY)
+
+
+def test_run_turn_sends_nothing_when_no_witness_is_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    client = FakeClient()
+
+    def forbid(*_args, **_kwargs):
+        raise AssertionError("run_turn called the provider client directly")
+
+    monkeypatch.setattr("runtime.chat.complete", forbid)
+    result = run_turn("Capital of France?", "groq", _open_kernel(tmp_path), client=client)
+    assert result.verdict == "allow" and result.reply is None
+    assert client.calls == []
+    text = (tmp_path / "receipts.jsonl").read_text(encoding="utf-8")
+    assert text.count('"allow"') == 1 and '"status"' not in text
+
+
+def test_runtime_module_sends_nothing_when_no_witness_is_configured(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    called = []
+
+    def forbid(*_args, **_kwargs):
+        called.append("complete")
+        raise AssertionError("python -m runtime called the provider")
+
+    monkeypatch.setattr("runtime.chat.complete", forbid)
+    code = main([
+        "Capital of France?",
+        "--provider", "groq",
+        "--receipts", str(tmp_path / "receipts.jsonl"),
+    ])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert called == []
+    assert "no witness is configured; the provider was not called" in captured.err
+    assert "WARNING: WICKET_ALLOW_DIRECT_CALLS" not in captured.err
+
+
+def test_the_direct_call_opt_out_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
+    assert direct_calls_allowed() is False
+    for value in ("", "0", "true", "yes", "on"):
+        monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", value)
+        assert direct_calls_allowed() is False
+
+
+def test_the_direct_call_opt_out_sends_and_warns(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    client = FakeClient()
+    first = run_turn("Capital of France?", "groq", _open_kernel(tmp_path), client=client)
+    second = run_turn("Again?", "groq", _open_kernel(tmp_path), client=client)
+    assert first.reply == "Paris." and second.reply == "Paris."
+    assert len(client.calls) == 2
+    err = capsys.readouterr().err
+    assert err.count("WARNING: WICKET_ALLOW_DIRECT_CALLS=1") == 2
+    assert "Local development only" in err and "unsafe" in err
