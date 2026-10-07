@@ -1,3 +1,5 @@
+mod witness;
+
 use clap::{Parser, Subcommand};
 #[cfg(test)]
 use infinity_kernel::Decision;
@@ -103,6 +105,24 @@ enum Command {
     Demo {
         #[arg(long, default_value = "demo/receipts.live.jsonl")]
         log: String,
+    },
+    /// Append one signed entry to a witness log. The witness, not Nova, runs this.
+    WitnessAppend {
+        #[arg(long)]
+        log: String,
+        #[arg(long)]
+        sign_key: String,
+        /// JSON object: version, allow_receipt_id, call_digest, attempt, status, divergence, issued_at.
+        #[arg(long)]
+        entry: String,
+    },
+    /// Recompute witness-log hashes and require every entry to be signed. Does not apply `through`
+    /// key cutoffs; a key file that uses one is refused.
+    WitnessVerify {
+        #[arg(long)]
+        log: String,
+        #[arg(long)]
+        trusted_keys: String,
     },
 }
 fn read<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
@@ -405,7 +425,7 @@ fn append_chained(
     issued_at: String,
 ) -> Result<LogEntry, String> {
     append_entry(path, anchor, None, |previous| {
-        issue_receipt(decision, previous, issued_at)
+        issue_receipt(decision, previous, issued_at, None)
             .map(LogEntry::Decision)
             .map_err(|e| e.to_string())
     })
@@ -427,18 +447,19 @@ fn run(command: Command) -> Result<(), String> {
             let pol: Result<Policy, _> = read(&policy);
             p.and_then(|p| pol.map(|pol| (p, pol)))
                 .and_then(|(p, pol)| {
+                    let call_digest = p.call_digest.clone();
                     let d = evaluate(p, pol, ApprovalSet::from_ids(approvals))
                         .map_err(|e| e.to_string())?;
                     let r = match &log {
                         Some(path) => {
                             append_entry(path, anchor.as_deref(), signer.as_ref(), |previous| {
-                                issue_receipt(&d, previous, issued_at)
+                                issue_receipt(&d, previous, issued_at, call_digest.clone())
                                     .map(LogEntry::Decision)
                                     .map_err(|e| e.to_string())
                             })?
                         }
                         None => {
-                            let mut entry = issue_receipt(&d, None, issued_at)
+                            let mut entry = issue_receipt(&d, None, issued_at, call_digest)
                                 .map(LogEntry::Decision)
                                 .map_err(|e| e.to_string())?;
                             if let Some(signer) = &signer {
@@ -625,6 +646,7 @@ fn run(command: Command) -> Result<(), String> {
                     &decision,
                     previous.as_ref(),
                     format!("demo-sequence-{index}"),
+                    None,
                 )
                 .map_err(|e| e.to_string())?;
                 println!(
@@ -642,6 +664,23 @@ fn run(command: Command) -> Result<(), String> {
                 .join("\n")
                 + "\n";
             fs::write(log, jsonl).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        Command::WitnessAppend {
+            log,
+            sign_key,
+            entry,
+        } => {
+            let signer = load_signer(&sign_key)?;
+            let text = fs::read_to_string(&entry).map_err(|e| format!("{entry}: {e}"))?;
+            let appended = witness::append(&log, &signer, &text)?;
+            println!("{}", serde_json::to_string(&appended).expect("JSON"));
+            Ok(())
+        }
+        Command::WitnessVerify { log, trusted_keys } => {
+            let keys = load_trusted_keys(&trusted_keys)?;
+            let count = witness::verify(&log, &keys)?;
+            println!("witness log verified: {count} entries");
             Ok(())
         }
     }
@@ -888,7 +927,7 @@ mod tests {
     ) -> Result<LogEntry, String> {
         let d = decision(id);
         append_entry(log, anchor, Some(signer), |previous| {
-            issue_receipt(&d, previous, "t".into())
+            issue_receipt(&d, previous, "t".into(), None)
                 .map(LogEntry::Decision)
                 .map_err(|e| e.to_string())
         })

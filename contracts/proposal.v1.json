@@ -89,6 +89,11 @@
       ],
       "minLength": 1,
       "description": "Set only when re-submitting a request a human approved. Not part of the hash a human approval is bound to."
+    },
+    "call_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of a concrete call, sha256:<64 lowercase hex>. Optional. The kernel hashes it and does not interpret it. The signer fills it when the request includes a call; a proposal that only states it is the caller's claim."
     }
   }
 }

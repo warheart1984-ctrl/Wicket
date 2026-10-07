@@ -17,8 +17,10 @@ What "verified" means, and does not mean, is printed at the end of every run. Th
     and, with trusted keys, that each entry was signed by a key you trust.
   * Deleting the newest entries is only caught if you pass an anchor that the log's writer could
     not edit (a copy you fetched yourself from the published anchor repository).
-  * It does NOT show that what was done matched what was asked, that the clock was right, or that
-    a signing key was never stolen.
+  * It does NOT show that what was done matched what was asked. A receipt may carry a call_digest;
+    this program checks that the field is covered by the hash when it is present. It does not
+    recompute that digest from a call, and it does not read a witness log. It also does not show
+    that the clock was right, or that a signing key was never stolen.
 
 Exit status: 0 verified, 1 not verified, 2 the inputs could not be read.
 """
@@ -42,7 +44,8 @@ SIGNATURE_PREFIX = "ed25519:"
 
 # Fields each entry kind is built from. Anything else in a line is not covered by the entry's hash.
 RECEIPT_FIELDS = {"version", "receipt_id", "previous_receipt_hash", "proposal_hash", "policy_hash",
-                  "decision_hash", "verdict", "reason_codes", "issued_at", "key_id", "signature"}
+                  "decision_hash", "verdict", "reason_codes", "issued_at", "call_digest", "key_id",
+                  "signature"}
 OUTCOME_FIELDS = {"version", "receipt_id", "previous_receipt_hash", "decision_receipt_id", "status",
                   "request_sha256", "response_sha256", "issued_at", "key_id", "signature"}
 
@@ -227,6 +230,11 @@ def parse_entry(line: str) -> Dict[str, Any]:
             "decision_hash": _req_str(raw, "decision_hash"), "verdict": _req_str(raw, "verdict"),
             "reason_codes": codes, "issued_at": _req_str(raw, "issued_at"),
         }
+        if "call_digest" in raw:
+            digest = raw["call_digest"]
+            if not isinstance(digest, str):
+                raise ValueError("call_digest must be text")
+            fields["call_digest"] = digest
         known = RECEIPT_FIELDS
     fields["key_id"], fields["signature"] = _opt_str(raw, "key_id"), _opt_str(raw, "signature")
     fields["kind"] = kind
@@ -248,6 +256,8 @@ def expected_id(entry: Dict[str, Any]) -> Optional[str]:
                                           "decision_hash", "verdict", "reason_codes")}
         if entry["version"] == RECEIPT_V2:
             material["issued_at"] = entry["issued_at"]
+            if "call_digest" in entry:
+                material["call_digest"] = entry["call_digest"]
     return "receipt:" + hash_value(material)
 
 
@@ -508,9 +518,11 @@ What this does and does not show
   - It shows the entries are unchanged since they were written, in order, with none inserted or
     removed in the middle (and none cut from the end, if the anchor you gave is genuine and current).
   - With trusted keys, it shows each entry was signed by a holder of a key you chose to trust.
-  - It does NOT show that what was done matched what was asked (a decision records the request as the
-    caller described it), that an outcome is true, that the clock was right, or that a signing key was
-    never stolen. An empty or unsigned log can still "verify".
+  - It does NOT show that what was done matched what was asked. A receipt may carry a call_digest;
+    that field is covered by the hash when it is present. This program does not recompute the digest
+    from a call, and it does not read a witness log. An outcome is still the caller's claim. It does
+    not show that the clock was right, or that a signing key was never stolen. An empty or unsigned
+    log can still "verify".
   - The anchor and the trusted keys must come from somewhere the log's writer cannot edit. A copy that
     sits next to the log proves nothing about deleted entries."""
 

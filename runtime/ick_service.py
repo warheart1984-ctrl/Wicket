@@ -22,9 +22,15 @@ denied. Nova cannot invent one. (How many times an approval may be used is still
 only, so a taken-over Nova can replay an unspent approval until it expires.)
 
 What this does NOT do
-  * It cannot tell whether Nova describes its action truthfully. A taken-over Nova can still ask
-    "may I do a harmless read?" and then do something else. The log proves what was asked and
-    what the policy said, not what was done.
+  * Without a ``call`` on the request, it cannot tell whether Nova describes its action
+    truthfully. A taken-over Nova can still ask "may I do a harmless read?" and then do
+    something else. The log proves what was asked and what the policy said, not what was done.
+  * With a ``call``, this process derives ``effect`` and ``target`` from a known call shape,
+    computes ``call_digest`` itself, and denies a disagreement or an unknown shape. It still
+    does not perform the call. Executor mode is ``runtime/witness.py``: a different key and a
+    different log. Nova's HTTP routes are not wired through that witness.
+  * ``infinityctl evaluate`` on its own still trusts the caller's effect, target, and
+    ``call_digest``. Derivation happens here, only when ``call`` is present.
   * An outcome ("completed", "failed", the hashes) is Nova's claim, now signed and chained.
   * It does not stop Nova from stopping to ask at all (see the anchor and its publication).
 
@@ -52,6 +58,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from runtime.call_binding import BindingError, bind_proposal
 from runtime.kernel import Kernel, KernelError, find_binary
 
 MAX_REQUEST = 1 << 20  # 1 MiB; a proposal is a few hundred bytes plus the request digest
@@ -140,6 +147,11 @@ class Service:
             if not isinstance(ids, list) or not all(isinstance(i, str) and 0 < len(i) <= 200 for i in ids) \
                     or len(ids) > 8:
                 raise ServiceError("approval_ids must be a short list of strings")
+            if "call" in request:
+                try:
+                    proposal = bind_proposal(proposal, request.get("call"))
+                except BindingError as exc:
+                    raise ServiceError(str(exc)) from exc
             with self._lock:
                 self._check_approvals(ids, proposal, now)
                 return self.kernel.evaluate_raw(proposal, tuple(ids))

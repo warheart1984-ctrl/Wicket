@@ -263,9 +263,13 @@ NOVA_ICK_SERVICE=/run/ick/ick.sock python -m nova.api
   (`KERNEL_UNAVAILABLE`); if only the outcome cannot be recorded, the reply is withheld as before.
 
 **What it does not do.**
-- It cannot tell whether Nova describes its action truthfully. A taken-over Nova can ask about a harmless
-  read and then do something else; the log proves what was asked and what the policy said, not what was
-  done. Outcomes ("completed", the hashes) are Nova's claim, now signed and chained.
+- Without a concrete `call`, it cannot tell whether Nova describes its action truthfully. A taken-over
+  Nova can ask about a harmless read and then do something else; the receipt log proves what was asked
+  and what the policy said, not what was done. When the request includes a `call`, the signer derives
+  effect and target for a known shape and denies a disagreement. It still does not perform the call.
+  Executor mode (`docs/executor-mode.md`) is a separate witness, with its own key, that performs the
+  call after checking the allow. Nova's HTTP routes do not go through that witness. Outcomes
+  ("completed", the hashes) on the receipt log remain Nova's claim, signed and chained.
 - Nova can still stop asking, or stop the service from being reachable. Rollback and silence are caught by
   the published anchor and `watch`, not by the signature.
 - The key is still a file, on the service's machine. There is no hardware key or key store. A key can be
