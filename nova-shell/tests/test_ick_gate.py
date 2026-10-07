@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import executor_setup
+from nova.errors import ProviderError
 from nova.ick import IckGate, IckGatedProvider, KernelRefusal, _find_binary
 
 REPO = Path(__file__).resolve().parents[2]
@@ -208,12 +209,17 @@ def test_local_model_tool_is_gated(monkeypatch, deny_policy, tmp_path):
     assert calls == ["_ollama_generate"]  # neither the Ollama call nor the vLLM fallback ran
 
 
-def test_local_model_tool_is_unchanged_when_the_gate_is_off(monkeypatch):
+def test_local_model_tool_sends_nothing_when_the_gate_is_off(monkeypatch):
     from nova.node.tools import local_model
 
     calls = _count_calls(monkeypatch, local_model, ["_ollama_generate", "_vllm_generate"])
     monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
-    assert local_model.generate("hello") == "generated" and calls == ["_ollama_generate"]
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
+    with pytest.raises(ProviderError) as err:
+        local_model.generate("hello")
+    assert err.value.code == "WITNESS_REQUIRED"
+    assert calls == []
 
 
 @pytest.mark.parametrize("intent", ["code", "wire", "explain"])

@@ -14,6 +14,7 @@ from nova.errors import ProviderError
 from nova.ick import KernelRefusal, _find_binary
 from nova.node.tools import local_model
 from nova.providers.provider_external import ExternalProvider
+from runtime.call_binding import derive, describe_https
 from runtime.witness import dispatch_https
 
 DEMO = Path(__file__).resolve().parents[2] / "demo" / "policy.json"
@@ -97,6 +98,54 @@ def test_api_chat_does_not_reach_the_provider_without_a_witness(client, model, m
     assert response.status_code == 403, response.text
     assert response.json()["error"]["code"] == "WITNESS_UNAVAILABLE"
     assert model.requests == []
+
+
+def test_the_direct_call_opt_out_does_not_bypass_a_configured_policy(client, model, monkeypatch, tmp_path, capsys):
+    policy = tmp_path / "open.json"
+    _open_policy(policy)
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
+    monkeypatch.setenv("NOVA_ICK_LOG", str(tmp_path / "receipts.jsonl"))
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
+    response = client.post("/v1/chat", json={"prompt": "What is the capital of France?"})
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "WITNESS_UNAVAILABLE"
+    assert model.requests == []
+    assert "WARNING: WICKET_ALLOW_DIRECT_CALLS" not in capsys.readouterr().err
+
+
+def test_a_configured_gate_keeps_the_derived_call_digest(client, model, monkeypatch, tmp_path):
+    policy = tmp_path / "open.json"
+    _open_policy(policy)
+    log = tmp_path / "receipts.jsonl"
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
+    monkeypatch.setenv("NOVA_ICK_LOG", str(log))
+    client_calls = []
+
+    def boom(*_args, **_kwargs):
+        client_calls.append("post_json")
+        raise AssertionError("Nova called the provider client")
+
+    monkeypatch.setattr("nova.providers.provider_external.post_json", boom)
+    digests = []
+
+    def dispatch(bound):
+        call = describe_https(bound.method, bound.url, dict(bound.headers), bound.body)
+        derived = derive(call)
+        assert bound.call_digest == derived.call_digest
+        assert bound.effect == derived.effect == "write"
+        assert bound.target == derived.target
+        digests.append(derived.call_digest)
+        return dispatch_https(bound)
+
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+        response = client.post("/v1/chat", json={"prompt": "What is the capital of France?"})
+    assert response.status_code == 200, response.text
+    assert response.json()["text"] == "Paris is the capital of France."
+    assert client_calls == []
+    assert len(model.requests) == 1
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    allow = next(entry for entry in entries if entry.get("verdict") == "allow")
+    assert allow["call_digest"] == digests[0]
 
 
 def test_api_chat_reaches_the_provider_only_through_the_witness(client, model, monkeypatch, tmp_path):

@@ -27,12 +27,18 @@ def _capture(monkeypatch):
 
 
 def test_post_json_sends_a_user_agent(monkeypatch):
+    monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     seen = _capture(monkeypatch)
     http.post_json("http://example.test", {}, timeout=1)
     assert seen["headers"]["user-agent"] == http.USER_AGENT
 
 
 def test_caller_can_override_the_user_agent(monkeypatch):
+    monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     seen = _capture(monkeypatch)
     http.post_json("http://example.test", {}, timeout=1, headers={"User-Agent": "custom/1"})
     assert seen["headers"]["user-agent"] == "custom/1"

@@ -139,6 +139,10 @@ def test_explain_tool_returns_structured_analysis(monkeypatch) -> None:
 def test_local_model_falls_back_from_ollama_to_vllm(monkeypatch) -> None:
     from nova.node.tools import local_model
 
+    monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
+
     calls = []
 
     def fake_post_json(url, payload, timeout):
@@ -172,6 +176,10 @@ def test_local_model_falls_back_from_ollama_to_vllm(monkeypatch) -> None:
 
 def test_local_model_uses_non_streaming_ollama_json(monkeypatch) -> None:
     from nova.node.tools import local_model
+
+    monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
 
     captured = {}
 

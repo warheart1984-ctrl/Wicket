@@ -30,6 +30,9 @@ def test_provider_registry_builds_local_ollama_and_external() -> None:
 
 
 def test_ollama_provider_returns_completion_and_receipt(monkeypatch) -> None:
+    monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     from nova.providers.provider_ollama import OllamaProvider
 
     captured = {}
@@ -79,6 +82,9 @@ def test_ollama_provider_returns_completion_and_receipt(monkeypatch) -> None:
 
 
 def test_ollama_streaming_provider_emits_cursor_chunks(monkeypatch) -> None:
+    monkeypatch.delenv("NOVA_ICK_POLICY", raising=False)
+    monkeypatch.delenv("NOVA_ICK_SERVICE", raising=False)
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
     from nova.providers.provider_ollama import OllamaProvider
 
     lines = [

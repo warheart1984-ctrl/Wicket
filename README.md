@@ -42,8 +42,9 @@ python -m pytest        # offline tests, no keys needed
 
 `python -m runtime` asks the kernel and does not call the provider unless a witness performs
 the call. `WICKET_ALLOW_DIRECT_CALLS=1` is a local-development opt-out: it sends from this
-process and prints a warning on stderr every time. It is off when unset. Do not set it on a
-deployed service.
+process and prints a warning on stderr every time. It is off when unset, and any other value
+is off. The same variable is Nova's only escape for model HTTP, and only while Nova has no
+policy configured. It does not apply to gossip. Do not set it on a deployed service.
 
 Providers: `groq`, `nvidia`, `openrouter` (keys in `GROQ_API_KEY`, `NVIDIA_API_KEY`,
 `OPENROUTER_API_KEY`; models can be overridden with `INFINITY_<NAME>_MODEL`).
@@ -273,11 +274,15 @@ NOVA_ICK_SERVICE=/run/ick/ick.sock python -m nova.api
   and what the policy said, not what was done. When the request includes a `call`, the signer derives
   effect and target for a known shape and denies a disagreement. It still does not perform the call.
   Executor mode (`docs/executor-mode.md`) is a separate witness, with its own key, that performs the
-  call after checking the allow. When Nova's gate is on, provider HTTP and the local-model tool go
-  through that witness (`NOVA_ICK_WITNESS`) or are not sent. `run_turn` and `python -m runtime`
-  do not call the provider without a witness (the local-dev opt-out is `WICKET_ALLOW_DIRECT_CALLS=1`,
-  off by default, and it warns on stderr). Gossip is sent by that witness from a derived call, or
-  not sent. Outcomes ("completed", the hashes) on
+  call after checking the allow. Nova model HTTP sends nothing unless a policy
+  (`NOVA_ICK_POLICY` or `NOVA_ICK_SERVICE`) and a witness (`NOVA_ICK_WITNESS`) are both configured.
+  With both policy variables unset, Nova does not call the provider client. A witness without a
+  policy sends nothing. When both are set, provider HTTP and the local-model tool go through that
+  witness, and the `call_digest` is the one derived from the concrete call. `run_turn` and
+  `python -m runtime` do not call the provider without a witness. The local-dev opt-out is
+  `WICKET_ALLOW_DIRECT_CALLS=1` (off by default, warns on stderr every use, no derived digest).
+  It covers that runtime path and Nova model HTTP while the policy is unset. It does not apply to
+  gossip. Gossip is sent by the witness from a derived call, or not sent. Outcomes ("completed", the hashes) on
   the receipt log remain Nova's claim, signed and chained. This is not observed-effect proof.
 - Nova can still stop asking, or stop the service from being reachable. Rollback and silence are caught by
   the published anchor and `watch`, not by the signature.
@@ -406,7 +411,10 @@ python -m pytest          # 216 pass, 4 skipped (the skips test parts that were 
 python -m nova.api        # default provider is a built-in rule-based stub, not an LLM
 ```
 
-To use a real model, point its external provider at any OpenAI-compatible host:
+To use a real model, point its external provider at any OpenAI-compatible host. With no
+policy and no witness, that process does not call the provider. The local-dev escape is
+`WICKET_ALLOW_DIRECT_CALLS=1`, which warns on stderr every time. The governed path is the
+next section: a policy and a witness, both required.
 
 ```bash
 NOVA_PROVIDER=external NOVA_EXTERNAL_URL=https://integrate.api.nvidia.com/v1 \
@@ -415,24 +423,46 @@ python -m nova.api
 ```
 
 Groq (`https://api.groq.com/openai/v1`, `openai/gpt-oss-120b`) works the same way. Both
-were checked live. One change was made to the imported code: a `User-Agent` header,
-because Groq rejects Python's default one.
+were checked live before this default. One change was made to the imported code: a `User-Agent`
+header, because Groq rejects Python's default one. `User-Agent` is sent and is not part of
+`call_digest`.
 
-### Nova asks the kernel first
+### Nova sends model HTTP only with a policy and a witness
 
-Set `NOVA_ICK_POLICY` to a policy file and Nova asks the ICK kernel before it calls a
-model; with it unset, those model calls are unchanged. Gossip does not send unless that
-gate produces a matching allow and a witness performs the call. Optional: `NOVA_ICK_BIN`, `NOVA_ICK_LOG` (chained
-receipt log) and `NOVA_ICK_ANCHOR` (needs the log). To keep the key and log away from Nova entirely, set
-`NOVA_ICK_SERVICE` instead (see the signer service).
+With `NOVA_ICK_POLICY` and `NOVA_ICK_SERVICE` both unset, Nova does not call the provider
+client. Nothing is sent. Sending requires a policy and a witness. The policy is
+`NOVA_ICK_POLICY` (a policy file) or `NOVA_ICK_SERVICE` (the signer service socket). The
+witness is `NOVA_ICK_WITNESS`, the socket of `python -m runtime.witness_service`. A witness
+with no policy is not enough. A policy with no witness does not send (`WITNESS_UNAVAILABLE`).
+
+`WICKET_ALLOW_DIRECT_CALLS=1` is the only escape, and only while that policy is unset. It is
+for local development. It is off when unset, and any other value is off. When it is exactly
+`1`, Nova calls the provider from this process and writes a warning to stderr every time.
+That path does not go through the witness and does not derive a `call_digest`. It does not
+apply to gossip, and it does not bypass a policy that is already set. Do not set it in a
+deploy unit or a production environment.
+
+When the policy and the witness are both configured, Nova asks the kernel and the witness
+sends a known-shape call. Effect, target, and `call_digest` come from that call. Gossip does
+not send unless that gate produces a matching allow and a witness performs the call.
+Optional with `NOVA_ICK_POLICY`: `NOVA_ICK_BIN`, `NOVA_ICK_LOG` (chained receipt log) and
+`NOVA_ICK_ANCHOR` (needs the log). To keep the key and log away from Nova entirely, set
+`NOVA_ICK_SERVICE` instead (see the signer service). Nova still does not hold the witness key.
 
 ```bash
 cargo build
+# Start `python -m runtime.witness_service serve --socket /path/to/witness.sock ...`
+# on its own key, then:
 NOVA_ICK_POLICY=demo/policy.json NOVA_ICK_LOG=.runtime/receipts.jsonl \
+NOVA_ICK_WITNESS=/path/to/witness.sock \
 NOVA_PROVIDER=external NOVA_EXTERNAL_URL=https://integrate.api.nvidia.com/v1 \
 NOVA_EXTERNAL_API_KEY=... NOVA_EXTERNAL_MODEL=nvidia/nemotron-3-super-120b-a12b \
 python -m nova.api
 ```
+
+Without `NOVA_ICK_WITNESS` (or an in-process witness), that command does not send: the policy
+is set and the witness is missing. The demo policy also requires approval for writes, and a
+provider chat is a POST, so its derived effect is `write`.
 
 - An `allow` verdict lets the call through, and the reply carries `nova.ick` with the
   kernel's verdict and receipt id.
@@ -451,7 +481,9 @@ python -m nova.api
     target, and `call_digest` come from that call. The witness sends it only after a matching
     allow. A peer that is refused shows `status: "refused"` and nothing is sent. An unknown
     shape is `UNKNOWN_CALL_SHAPE`. With no policy and no witness, nothing is sent.
-- Any refusal on any route becomes HTTP 403 through one app-wide handler, never a 500.
+- A kernel refusal on any route, including model HTTP with no policy configured
+  (`WITNESS_REQUIRED`), becomes HTTP 403 through one app-wide handler. A provider that was
+  actually contacted and then failed is still HTTP 500.
 - Gossip is a `write`, and the demo policy requires approval for writes, so with
   `demo/policy.json` gossip waits until a human approves it (see below), or until you use
   a policy with `effects_requiring_approval: []`.
