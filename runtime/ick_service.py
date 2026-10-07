@@ -28,7 +28,7 @@ What this does NOT do
   * With a ``call``, this process derives ``effect`` and ``target`` from a known call shape,
     computes ``call_digest`` itself, and denies a disagreement or an unknown shape. It still
     does not perform the call. Executor mode is ``runtime/witness.py``: a different key and a
-    different log. Nova's HTTP routes are not wired through that witness.
+    different log. When Nova's gate is on, known shapes are sent by that witness or not sent.
   * ``infinityctl evaluate`` on its own still trusts the caller's effect, target, and
     ``call_digest``. Derivation happens here, only when ``call`` is present.
   * An outcome ("completed", "failed", the hashes) is Nova's claim, now signed and chained.

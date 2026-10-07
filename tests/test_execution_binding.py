@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "verifier"))
+import ickverify  # noqa: E402
+
 import pytest
 
 from runtime.call_binding import bind_proposal, derive
@@ -398,3 +401,149 @@ def test_http_dispatch_does_not_follow_redirects():
         server.server_close()
     assert seen == ["/start"]
     assert body == b""
+
+
+def test_ickverify_recomputes_the_same_call_digest():
+    plain = https_call("GET", "example.test", 443, "/x")
+    same = https_call("get", "Example.Test", 443, "/x")
+    with_secret = https_call("GET", "example.test", 443, "/x", authorization="secret-a")
+    other_secret = https_call("GET", "example.test", 443, "/x", authorization="secret-b")
+    tool = {"shape": "local_model_tool", "tool": "explain", "arguments": {"b": 1, "a": 2}}
+    again = {"shape": "local_model_tool", "tool": "explain", "arguments": {"a": 2, "b": 1}}
+    for call in (plain, same, with_secret, other_secret, tool, again):
+        assert ickverify.call_digest(call) == derive(call).call_digest
+    assert ickverify.call_digest(plain) == ickverify.call_digest(same)
+    assert ickverify.call_digest(with_secret) == ickverify.call_digest(other_secret)
+    assert ickverify.call_digest(with_secret) != ickverify.call_digest(plain)
+    assert ickverify.call_digest(tool) == ickverify.call_digest(again)
+
+
+def _allow_receipt(tmp_path, *, digest):
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({
+        "version": "infinity.policy.v1", "policy_id": "policy-test-v1",
+        "denied_effects": [], "effects_requiring_approval": [],
+    }))
+    log = tmp_path / "receipts.jsonl"
+    body = proposal("read", "stated-target")
+    if digest is not None:
+        body["call_digest"] = digest
+    Kernel(policy, log, binary=BINARY).evaluate(body)
+    receipt = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    return log, receipt
+
+
+@pytest.mark.skipif(BINARY is None, reason="infinityctl not built (run `cargo build`)")
+def test_a_forged_call_digest_fails_verify(tmp_path):
+    call = https_call("GET", "example.test", 80, "/real")
+    forged = "sha256:" + ("ab" * 32)
+    assert forged != derive(call).call_digest
+    log, receipt = _allow_receipt(tmp_path, digest=forged)
+    report = ickverify.verify(log.read_text(encoding="utf-8"), call_text=json.dumps({
+        "receipt_id": receipt["receipt_id"], "call": call,
+    }))
+    assert report["ok"] is False
+    assert any("forged call_digest" in error for error in report["errors"])
+
+
+@pytest.mark.skipif(BINARY is None, reason="infinityctl not built (run `cargo build`)")
+def test_an_omitted_call_digest_on_a_bound_call_fails_verify(tmp_path):
+    call = https_call("POST", "example.test", 80, "/real", body="x")
+    log, receipt = _allow_receipt(tmp_path, digest=None)
+    assert "call_digest" not in receipt
+    report = ickverify.verify(log.read_text(encoding="utf-8"), call_text=json.dumps({
+        "receipt_id": receipt["receipt_id"], "call": call,
+    }))
+    assert report["ok"] is False
+    assert any("omitted call_digest" in error for error in report["errors"])
+
+
+def _verify_join(log, witness_log, witness_keys, call=None, receipt_id=None):
+    command = [
+        sys.executable, str(VERIFIER), str(log),
+        "--witness-log", str(witness_log),
+        "--witness-keys", str(witness_keys),
+        "--json",
+    ]
+    if call is not None:
+        bind = log.parent / "call.json"
+        bind.write_text(json.dumps({"receipt_id": receipt_id, "call": call}), encoding="utf-8")
+        command += ["--call", str(bind)]
+    done = subprocess.run(command, capture_output=True, text=True)
+    report = json.loads(done.stdout) if done.stdout.strip().startswith("{") else {"ok": False, "errors": [done.stderr]}
+    return done.returncode, report
+
+
+@pytest.mark.skipif(BINARY is None, reason="infinityctl not built (run `cargo build`)")
+def test_witness_join_reports_mismatch_unauthorized_reused_late_and_missing(tmp_path):
+    call = https_call("GET", "example.test", 80, "/join")
+    world = World(tmp_path)
+    allowed = world.allow(call)
+    receipt_id = allowed["receipt"]["receipt_id"]
+    empty = tmp_path / "empty-witness.jsonl"
+    empty.write_text("", encoding="utf-8")
+    code, report = _verify_join(world.log, empty, world.witness_pub)
+    assert code == 1 and report["ok"] is False
+    assert any("missing execution" in error for error in report["errors"])
+
+    witness = world.witness()
+    mismatch = witness.execute(https_call("POST", "example.test", 80, "/join", body="no"), receipt_id)
+    assert mismatch.divergence == "mismatch"
+    code, report = _verify_join(world.log, world.witness_log, world.witness_pub, call, receipt_id)
+    assert code == 1
+    assert any(error.startswith("mismatch:") for error in report["errors"])
+
+    denied = world.service.handle({
+        "op": "evaluate",
+        "proposal": proposal("read", "nope"),
+        "call": {"shape": "shell", "cmd": "id"},
+    })
+    unauthorized = witness.execute(call, denied["receipt"]["receipt_id"])
+    assert unauthorized.divergence == "unauthorized"
+    code, report = _verify_join(world.log, world.witness_log, world.witness_pub)
+    assert any(error.startswith("unauthorized:") for error in report["errors"])
+
+    (tmp_path / "replay").mkdir()
+    fresh = World(tmp_path / "replay")
+    replay_call = https_call("GET", "example.test", 80, "/replay")
+    replay_id = fresh.allow(replay_call)["receipt"]["receipt_id"]
+    replay = fresh.witness()
+    assert replay.execute(replay_call, replay_id).status == "completed"
+    assert replay.execute(replay_call, replay_id).divergence == "reused"
+    code, report = _verify_join(fresh.log, fresh.witness_log, fresh.witness_pub, replay_call, replay_id)
+    assert any(error.startswith("reused:") for error in report["errors"])
+    assert not any("missing execution" in error for error in report["errors"])
+
+    (tmp_path / "late").mkdir()
+    late_world = World(tmp_path / "late")
+    late_call = https_call("GET", "example.test", 80, "/late")
+    late_receipt = late_world.allow(late_call)["receipt"]
+    issued = _issued(late_receipt["issued_at"])
+    assert late_world.witness(clock=lambda: issued + 3601).execute(late_call, late_receipt["receipt_id"]).divergence == "late"
+    code, report = _verify_join(late_world.log, late_world.witness_log, late_world.witness_pub)
+    assert any(error.startswith("late:") for error in report["errors"])
+
+    (tmp_path / "good").mkdir()
+    good = World(tmp_path / "good")
+    good_call = https_call("GET", "example.test", 80, "/good")
+    good_id = good.allow(good_call)["receipt"]["receipt_id"]
+    assert good.witness().execute(good_call, good_id).status == "completed"
+    code, report = _verify_join(good.log, good.witness_log, good.witness_pub, good_call, good_id)
+    assert code == 0 and report["ok"] is True, report
+
+    tampered = good.witness_log.read_text(encoding="utf-8").replace("ed25519:", "ed25519:00", 1)
+    bad_log = tmp_path / "tampered.jsonl"
+    bad_log.write_text(tampered, encoding="utf-8")
+    code, report = _verify_join(good.log, bad_log, good.witness_pub)
+    assert code == 1
+    assert any("signature" in error for error in report["errors"])
+
+    cutoff = tmp_path / "cutoff.pub"
+    cutoff.write_text(good.witness_pub.read_text(encoding="utf-8").strip() + f" through {good_id}\n", encoding="utf-8")
+    refused = subprocess.run(
+        [sys.executable, str(VERIFIER), str(good.log), "--witness-log", str(good.witness_log),
+         "--witness-keys", str(cutoff)],
+        capture_output=True, text=True,
+    )
+    assert refused.returncode == 2
+    assert "through" in refused.stderr

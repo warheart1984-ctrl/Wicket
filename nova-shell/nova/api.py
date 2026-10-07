@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import os
-import json
-import time
-from uuid import uuid4
-from dataclasses import dataclass
-from typing import Any
 import asyncio
+import json
+import os
+import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from typing import Any
+from uuid import uuid4
+
+from runtime.call_binding import describe_https
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -71,6 +73,34 @@ class OllamaChatProvider:
             temperature=temperature,
         )
 
+    def https_call(self, governed_request: dict[str, Any]) -> dict[str, Any]:
+        model = str(governed_request.get("model") or self.model)
+        payload = {
+            "model": model,
+            "messages": governed_request.get("messages", []),
+            "stream": False,
+            "options": {
+                "num_predict": int(governed_request.get("max_tokens") or 512),
+                "temperature": float(governed_request.get("temperature") or 0.2),
+            },
+        }
+        body = json.dumps(payload).encode("utf-8")
+        return describe_https(
+            "POST", f"{self.base_url}/api/chat", {"Content-Type": "application/json"}, body,
+        )
+
+    def response_from_body(self, body: bytes) -> ProviderResponse:
+        data = json.loads(body.decode("utf-8") or "{}")
+        message = data.get("message") or {}
+        text = str(message.get("content") or "")
+        return ProviderResponse(
+            content=text,
+            provider=self.provider_id,
+            model=str(data.get("model") or self.model),
+            input_tokens=int(data.get("prompt_eval_count") or 0),
+            output_tokens=int(data.get("eval_count") or 0),
+        )
+
     def _invoke_sync(
         self,
         messages: list[dict[str, str]],
@@ -79,6 +109,8 @@ class OllamaChatProvider:
         max_tokens: int,
         temperature: float,
     ) -> ProviderResponse:
+        if (os.environ.get("NOVA_ICK_POLICY") or "").strip() or (os.environ.get("NOVA_ICK_SERVICE") or "").strip():
+            raise RuntimeError("the gate is on; this Ollama call is sent by the witness, not by Nova")
         payload = {
             "model": model,
             "messages": messages,

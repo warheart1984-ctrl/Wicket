@@ -26,7 +26,9 @@ Context:
 Return ONLY the glue code. No explanations.
 """
 
-    glue_code = generate(prompt, model=str(task.get("model") or "qwen2.5-coder:3b"), temperature=0.1)
+    glue_code = generate(
+        prompt, tool="wire", model=str(task.get("model") or "qwen2.5-coder:3b"), temperature=0.1,
+    )
     return {
         "glue_code": glue_code,
         "goal": goal,

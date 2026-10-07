@@ -1,7 +1,8 @@
 """Derive effect, target, and call_digest from a concrete call.
 
-One implementation, shared by the signer and the witness. The standalone verifier does not
-recompute these digests. A bug here is a bypass; there is no second implementation yet.
+Shared by the signer and the witness. ``verifier/ickverify.py`` is a second implementation
+of this digest (standard library only; it does not import this module). A bug in either
+one is a bypass, which is why tests compare them.
 
 The digest is SHA-256 (``sha256:<64 hex>``), not the SHA3-256 the receipt chain uses. It covers
 the call that will be sent. It does not cover what the target does with that call.
@@ -29,6 +30,7 @@ import base64
 import copy
 import hashlib
 import json
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
@@ -237,6 +239,51 @@ def _tool(call: dict[str, Any]) -> BoundCall:
         tool=tool,
         arguments_json=encoded,
     )
+
+
+def describe_https(
+    method: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    body: bytes = b"",
+) -> dict[str, Any]:
+    """The ``https_request`` object ``derive`` accepts for one request.
+
+    ``User-Agent`` is not part of the digest. It is dropped here. The authorization
+    value is kept so the witness can send it; only its presence is hashed.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    scheme = parts.scheme
+    if parts.port is not None:
+        port = parts.port
+    elif scheme == "https":
+        port = 443
+    elif scheme == "http":
+        port = 80
+    else:
+        port = 0
+    kept: dict[str, str] = {}
+    for key, value in (headers or {}).items():
+        if key.lower() in ("content-type", "content-encoding", "authorization"):
+            kept[key] = value
+    call: dict[str, Any] = {
+        "shape": "https_request",
+        "method": method,
+        "scheme": scheme,
+        "host": host,
+        "port": port,
+        "path": parts.path or "/",
+    }
+    if parts.query:
+        call["query"] = parts.query
+    if kept:
+        call["headers"] = kept
+    if any(key.lower() == "authorization" for key in kept):
+        call["authorization_present"] = True
+    if body:
+        call["body_b64"] = base64.b64encode(body).decode("ascii")
+    return call
 
 
 def derive(call: Any) -> BoundCall:

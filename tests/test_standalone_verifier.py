@@ -321,7 +321,7 @@ def test_it_runs_alone_with_nothing_but_python(tmp_path):
                           cwd=alone, capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "")})
     assert done.returncode == 0, done.stderr
     imports = [ln for ln in VERIFIER.read_text(encoding="utf-8").splitlines() if ln.startswith(("import ", "from "))]
-    allowed = {"argparse", "hashlib", "json", "sys", "typing", "__future__"}
+    allowed = {"argparse", "base64", "hashlib", "json", "sys", "typing", "__future__"}
     assert {ln.split()[1].split(".")[0] for ln in imports} <= allowed, imports
 
 

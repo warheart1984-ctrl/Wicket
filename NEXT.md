@@ -18,12 +18,11 @@ Executor mode is in `docs/executor-mode.md`. It covers dispatched, and the bytes
 back. It does not prove observed effect.
 
 Still open from that design, on purpose:
-- Observer mode, `state_ref`, retries after a failure, a witness heartbeat, and `ickverify.py
-  --witness-log` (the verifier does not recompute `call_digest` and does not read the witness log).
-- A second implementation of the call digest. There is one, in `runtime/call_binding.py`.
-- Wiring Nova's HTTP routes through the witness. They are not gated by it.
-- An account-separation probe for the witness (two OS accounts). The tests use two keys in one process.
-- `through` key retirement on the witness log. `witness-verify` refuses a key file that uses it.
+- Observer mode, `state_ref`, retries after a failure, a witness heartbeat, and a two-account
+  probe for the witness. The tests use two keys in one process. Observed effect is not proved.
+- `through` key retirement on the witness log. `witness-verify` and `ickverify.py` refuse a key
+  file that uses it; they do not apply the cutoff.
+- Gossip, and `python -m runtime` without a witness, still call their targets after a kernel allow.
 
 ## Other open items
 - The reviewer's other points: actor not authenticated, time not proven correct, concurrency and

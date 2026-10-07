@@ -67,13 +67,16 @@ These are real limits, not fine print.
    judges the description it is given. If the process that calls it says "a harmless read" and then
    does something else, the receipt log records the harmless read. Outcomes ("completed", the hashes)
    on that log are the caller's claim; they are signed and chained, not verified.
-   Executor mode narrows this for one path. The signer, given a concrete `call` of a known shape,
-   derives effect and target and fills in `call_digest`; a disagreement or an unknown shape is a
-   deny (`tests/test_execution_binding.py`). The witness recomputes the digest, requires a chained
-   unused unexpired allow for that digest, consumes the allow, and only then sends the call. A
-   different call is refused and recorded as `mismatch`. This is not observed-effect proof, it is
-   not wired into Nova's HTTP routes, and `infinityctl evaluate` without the signer still trusts
-   the caller's description. See `docs/executor-mode.md`.
+   Executor mode narrows this for Nova's known shapes when the gate is on. The signer, given a
+   concrete `call`, derives effect and target and fills in `call_digest`; a disagreement or an
+   unknown shape is a deny (`tests/test_execution_binding.py`). The witness recomputes the digest,
+   requires a chained unused unexpired allow for that digest, consumes the allow, and only then
+   sends the call. A different call is refused and recorded as `mismatch`. Provider HTTP and the
+   local-model tool go through that witness or are not sent (`tests/test_witness_gate.py`).
+   `ickverify.py` recomputes `call_digest` when given the concrete call and joins the witness log.
+   This is not observed-effect proof. `infinityctl evaluate` without the signer still trusts the
+   caller's description. Gossip and `python -m runtime` without a witness are not on this path.
+   See `docs/executor-mode.md`.
 1a. **Who is asking is not checked.** Every proposal has an `actor`, but the kernel never reads it and no policy
    rule can mention it: it is recorded and hashed (so it cannot be edited later), not enforced, and not
    authenticated. Nova names the path that is asking (`nova-shell/model-provider`, `nova-shell/local-model-tool`,
@@ -119,7 +122,9 @@ The verifier prints this with every run, because the word is easy to over-read:
 - None were cut from the end *if* the anchor you gave is genuine and current. It also tells you when the
   newest entries are not anchored yet, when no anchor was given, and when signatures were not checked.
 - With trusted keys, each signed entry was signed by a holder of a key you chose to trust.
-- It does **not** show that what was done matched what was asked, that an outcome is true, that the clock
+- It does **not** show observed effect: that the target's state changed. With `--call` it recomputes
+  `call_digest` from the call you supply (a forged or omitted digest fails). With `--witness-log` it
+  joins executions to allows. It cannot rebuild a call from a digest. It does not show that the clock
   was right, or that a key was never stolen. An empty or unsigned log can still "verify"; the notes it
   prints say so.
 

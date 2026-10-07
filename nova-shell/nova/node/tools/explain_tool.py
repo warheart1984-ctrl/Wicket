@@ -43,6 +43,7 @@ Return a structured explanation as JSON:
 }}"""
     analysis = generate(
         prompt,
+        tool="explain",
         model=str(task.get("model") or "qwen2.5-coder:3b"),
         temperature=float(task.get("temperature", 0.2)),
         max_tokens=int(task.get("max_tokens", 2048)),

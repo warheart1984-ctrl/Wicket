@@ -78,15 +78,14 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> di
         raise ProviderError(f"{url} failed: {exc.reason}") from exc
 
 
-def complete(
+def prepared_request(
     provider: str,
     messages: list[dict[str, str]],
     *,
     max_tokens: int = 512,
-    client: Client | None = None,
     api_key: str | None = None,
-) -> str:
-    """Return the reply text from `provider`, or raise ProviderError."""
+) -> tuple[str, dict[str, Any], dict[str, str]]:
+    """URL, JSON body, and headers for one provider call. Raises ProviderError before any send."""
     spec = PROVIDERS.get(provider)
     if spec is None:
         raise ProviderError(f"unknown provider: {provider}")
@@ -105,7 +104,20 @@ def complete(
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
     }
-    response = (client or _post_json)(spec.url, payload, headers)
+    return spec.url, payload, headers
+
+
+def complete(
+    provider: str,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 512,
+    client: Client | None = None,
+    api_key: str | None = None,
+) -> str:
+    """Return the reply text from `provider`, or raise ProviderError."""
+    url, payload, headers = prepared_request(provider, messages, max_tokens=max_tokens, api_key=api_key)
+    response = (client or _post_json)(url, payload, headers)
     choice = (response.get("choices") or [{}])[0]
     text = str((choice.get("message") or {}).get("content") or "").strip()
     if not text:
