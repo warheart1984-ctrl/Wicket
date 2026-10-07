@@ -22,7 +22,10 @@ Still open from that design, on purpose:
   probe for the witness. The tests use two keys in one process. Observed effect is not proved.
 - `through` key retirement on the witness log. `witness-verify` and `ickverify.py` refuse a key
   file that uses it; they do not apply the cutoff.
-- Gossip, and `python -m runtime` without a witness, still call their targets after a kernel allow.
+- `run_turn` / `python -m runtime` do not call the provider without a witness.
+  `WICKET_ALLOW_DIRECT_CALLS=1` is the local-dev opt-out (stderr warning, off by default).
+  Gossip goes through the witness on a derived shape; unknown shapes are denied.
+  Observed effect is still not proved.
 
 ## Other open items
 - The reviewer's other points: actor not authenticated, time not proven correct, concurrency and

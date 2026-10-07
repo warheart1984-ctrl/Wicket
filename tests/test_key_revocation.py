@@ -32,6 +32,8 @@ class Client:
 def env(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
     monkeypatch.delenv("INFINITY_SIGN_KEY", raising=False)
+    # These tests need a completed provider call. Explicit local-dev opt-out, not the default.
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
 
 
 def make_key(directory, name):

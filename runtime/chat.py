@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +13,10 @@ from runtime.call_binding import bind_proposal, derive, describe_https
 from runtime.kernel import Decision, Kernel, KernelError, sha256_text
 from runtime.providers import Client, ProviderError, complete, prepared_request
 from runtime.witness import Witness
+
+# Local development only. Unset means a known-shape provider call is not sent unless a
+# witness performs it. Never set this in a deploy unit or a production environment.
+DIRECT_CALLS_ENV = "WICKET_ALLOW_DIRECT_CALLS"
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,20 @@ def policy_version_of(kernel: Kernel) -> str:
     return json.loads(kernel.policy.read_text())["policy_id"]
 
 
+def direct_calls_allowed() -> bool:
+    """True only when the local-dev opt-out is explicitly set to ``1``. Unset is off."""
+    return os.environ.get(DIRECT_CALLS_ENV, "").strip() == "1"
+
+
+def warn_direct_calls() -> None:
+    """Stderr, every time the opt-out sends. Not a debug log."""
+    print(
+        "WARNING: WICKET_ALLOW_DIRECT_CALLS=1 is sending a provider call with no witness. "
+        "Local development only. This is unsafe. Do not set it in production.",
+        file=sys.stderr,
+    )
+
+
 def run_turn(
     message: str,
     provider: str,
@@ -53,11 +73,12 @@ def run_turn(
     max_tokens: int = 512,
     witness: Witness | None = None,
 ) -> TurnResult:
-    """One turn. With ``witness``, the provider is called only from that witness's dispatch.
+    """One turn. The provider is called by ``witness``, or not at all.
 
-    Without a witness this still calls the provider after the kernel allows it. That is the
-    runtime helper's existing opt-in: ``python -m runtime`` does not attach a witness. Nova's
-    HTTP gate (``NOVA_ICK_POLICY``) does not have that fallback.
+    ``python -m runtime`` does not attach a witness. With none configured, the kernel may
+    still record a decision and the provider client is not called. ``WICKET_ALLOW_DIRECT_CALLS=1``
+    is the local-dev opt-out: it sends from this process and warns on stderr. It does not
+    derive the call, and it is off unless that variable is exactly ``1``.
     """
     messages = list(history or []) + [{"role": "user", "content": message}]
     proposal = build_proposal(provider, message, policy_version_of(kernel))
@@ -74,9 +95,12 @@ def run_turn(
     receipt_id = str(decision.receipt.get("receipt_id"))
     if not decision.allowed:
         return TurnResult(decision.verdict, decision.reason_codes, receipt_id, None)
+    if witness is None and not direct_calls_allowed():
+        return TurnResult(decision.verdict, decision.reason_codes, receipt_id, None)
     request_sha = sha256_text(json.dumps([m["content"] for m in messages]))
     try:
         if witness is None:
+            warn_direct_calls()
             reply = complete(provider, messages, max_tokens=max_tokens, client=client)
         else:
             assert call is not None

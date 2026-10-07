@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 
+import executor_setup
 import pytest
 
 from nova.ick import IckGate, IckGatedProvider, KernelRefusal, _find_binary
@@ -251,25 +252,24 @@ def test_gossip_can_be_approved_like_any_other_action(tmp_path, monkeypatch):
 
     sent = []
 
-    class Response:
-        status = 200
-        def __enter__(self): return self
-        def __exit__(self, *exc): return False
+    def dispatch(bound):
+        sent.append(bound.url)
+        return b"{}"
 
     monkeypatch.setattr(federation, "load_peers", lambda: [{"peer_id": "p1", "endpoint": "http://peer.test"}])
     monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
-    monkeypatch.setattr(federation.urllib.request, "urlopen",
-                        lambda request, timeout=None: sent.append(request.full_url) or Response())
     demo = HERE.parent / "demo" / "policy.json"  # writes need approval
     monkeypatch.setenv("NOVA_ICK_POLICY", str(demo))
+    monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
     store = ApprovalStore(tmp_path / "human" / "approvals.jsonl", tmp_path / "state")
     monkeypatch.setenv("NOVA_ICK_APPROVALS", str(store.approvals_file))
     monkeypatch.setenv("NOVA_ICK_STATE", str(tmp_path / "state"))
 
-    assert federation.gossip_to_peers()[0]["status"] == "refused" and sent == []
-    store.approve(store.pending()[0]["proposal_hash"], approved_by="alice")
-    assert federation.gossip_to_peers()[0]["status"] == 200 and sent == ["http://peer.test/node/gossip"]
-    assert federation.gossip_to_peers()[0]["status"] == "refused"  # one use only
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+        assert federation.gossip_to_peers()[0]["status"] == "refused" and sent == []
+        store.approve(store.pending()[0]["proposal_hash"], approved_by="alice")
+        assert federation.gossip_to_peers()[0]["status"] == "sent" and sent == ["http://peer.test:80/node/gossip"]
+        assert federation.gossip_to_peers()[0]["status"] == "refused"  # one use only
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the stand-in binary is a #! script, which Windows cannot run")

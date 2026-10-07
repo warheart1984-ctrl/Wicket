@@ -36,6 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     if result.outcome_receipt_id:
         print(f"[outcome recorded] {result.outcome_receipt_id}")
     if result.reply is None:
+        if result.verdict == "allow":
+            print("no witness is configured; the provider was not called", file=sys.stderr)
         print("(no model call was made)")
         return 1
     print(result.reply)

@@ -27,6 +27,9 @@ class FakeClient:
 def keys(monkeypatch):
     for name in ("GROQ_API_KEY", "NVIDIA_API_KEY", "OPENROUTER_API_KEY"):
         monkeypatch.setenv(name, "test-key")
+    # Receipt-log tests need a completed provider call. This is the explicit local-dev
+    # opt-out, not the default: tests/test_runtime_witness.py leaves it unset.
+    monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
 
 
 def test_allowed_turn_calls_provider_and_logs_receipt(tmp_path):
