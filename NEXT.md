@@ -13,14 +13,17 @@
   `infinity-core/anchor/v1` (changing them would invalidate existing signatures and anchors).
 - Read `OVERVIEW.md`, then `THREAT_MODEL.md`, then `deploy/README.md`.
 
-## Next planned step (from an outside review)
-The reviewer's main point: a valid receipt proves what was asked and what the policy said, not
-that the action actually executed was the one authorized. Planned work:
-1. Add a section to `THREAT_MODEL.md` separating five things: proposed, authorized, dispatched,
-   executed, observed. State which Wicket proves today (the first two) and which it does not.
-2. Add an independent execution witness: a component Nova does not control that checks the
-   actual call against the authorized proposal's hash and records a signed "divergence" entry on
-   mismatch. Test it with the attack: get a receipt for a harmless read, do something else.
+## Next planned step
+Executor mode is in `docs/executor-mode.md`. It covers dispatched, and the bytes the witness got
+back. It does not prove observed effect.
+
+Still open from that design, on purpose:
+- Observer mode, `state_ref`, retries after a failure, a witness heartbeat, and `ickverify.py
+  --witness-log` (the verifier does not recompute `call_digest` and does not read the witness log).
+- A second implementation of the call digest. There is one, in `runtime/call_binding.py`.
+- Wiring Nova's HTTP routes through the witness. They are not gated by it.
+- An account-separation probe for the witness (two OS accounts). The tests use two keys in one process.
+- `through` key retirement on the witness log. `witness-verify` refuses a key file that uses it.
 
 ## Other open items
 - The reviewer's other points: actor not authenticated, time not proven correct, concurrency and

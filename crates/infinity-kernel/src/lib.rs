@@ -35,6 +35,10 @@ pub struct Proposal {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub approval_id: Option<String>,
+    /// `sha256:<64 hex>` of a concrete call. Stored and hashed; the kernel does not check it
+    /// against any call. Absent when the proposal does not bind one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_digest: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
@@ -89,6 +93,10 @@ pub struct Receipt {
     pub verdict: String,
     pub reason_codes: Vec<String>,
     pub issued_at: String,
+    /// Copied from the proposal when that proposal bound a call. Covered by the receipt hash
+    /// when present, so a reader can see the authorized digest without the proposal body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_digest: Option<String>,
     /// Set when the receipt was signed. Not part of the hash: the signature is over the hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
@@ -325,6 +333,22 @@ pub fn evaluate(
     if ["authority_change", "deploy", "audit_delete"].contains(&proposal.effect.as_str()) {
         return denied_decision(&proposal, policy_hash, proposal_hash, "FORBIDDEN_EFFECT");
     }
+    // A non-empty `payload.binding_fault` is a deny the signer sets when it will not trust the
+    // caller's description. It can only deny. `UNKNOWN_CALL_SHAPE` is kept; any other text,
+    // including a value a caller hoped would allow, is `DESCRIPTION_DISAGREEMENT`.
+    if let Some(fault) = proposal
+        .payload
+        .get("binding_fault")
+        .and_then(Value::as_str)
+        .filter(|fault| !fault.is_empty())
+    {
+        let code = if fault == "UNKNOWN_CALL_SHAPE" {
+            "UNKNOWN_CALL_SHAPE"
+        } else {
+            "DESCRIPTION_DISAGREEMENT"
+        };
+        return denied_decision(&proposal, policy_hash, proposal_hash, code);
+    }
     if policy.denied_effects.contains(&proposal.effect) {
         return denied_decision(
             &proposal,
@@ -389,6 +413,9 @@ fn receipt_material(r: &Receipt) -> Option<Value> {
         RECEIPT_VERSION_V1 => Some(material),
         RECEIPT_VERSION => {
             material["issued_at"] = json!(r.issued_at);
+            if let Some(digest) = &r.call_digest {
+                material["call_digest"] = json!(digest);
+            }
             Some(material)
         }
         _ => None,
@@ -405,6 +432,7 @@ pub fn issue_receipt(
     decision: &Decision,
     previous: Option<&LogEntry>,
     issued_at: String,
+    call_digest: Option<String>,
 ) -> Result<Receipt, KernelError> {
     let mut receipt = Receipt {
         version: RECEIPT_VERSION.into(),
@@ -416,6 +444,7 @@ pub fn issue_receipt(
         verdict: decision.verdict.clone(),
         reason_codes: decision.reason_codes.clone(),
         issued_at,
+        call_digest,
         key_id: None,
         signature: None,
     };
@@ -715,6 +744,11 @@ impl TrustedKeys {
     pub fn cutoff(&self, key_id: &str) -> Option<&str> {
         self.cutoffs.get(key_id).map(String::as_str)
     }
+    /// True when any trusted key carries a `through` cutoff. The witness log does not honor
+    /// cutoffs, so its checker refuses a key file that has one rather than ignoring it.
+    pub fn has_cutoff(&self) -> bool {
+        !self.cutoffs.is_empty()
+    }
     /// Is `key_id` trusted for something at 1-based position `position` of `entries`? An entry
     /// signed with a limited key must come at or before the receipt the limit names. If that receipt
     /// is not in this log at all, nothing signed by the key is accepted: this may be a different
@@ -852,6 +886,7 @@ mod tests {
             payload: json!({}),
             evidence_refs: vec![],
             approval_id: None,
+            call_digest: None,
         }
     }
     fn policy() -> Policy {
@@ -902,9 +937,62 @@ mod tests {
         );
     }
     #[test]
+    fn binding_fault_denies_and_cannot_force_an_allow() {
+        let mut disagreement = p("read");
+        disagreement.payload = json!({"binding_fault": "DESCRIPTION_DISAGREEMENT"});
+        let denied = evaluate(disagreement, policy(), ApprovalSet::default()).unwrap();
+        assert_eq!(denied.verdict, "deny");
+        assert_eq!(denied.reason_codes, vec!["DESCRIPTION_DISAGREEMENT"]);
+
+        let mut unknown = p("read");
+        unknown.payload = json!({"binding_fault": "UNKNOWN_CALL_SHAPE"});
+        assert_eq!(
+            evaluate(unknown, policy(), ApprovalSet::default())
+                .unwrap()
+                .reason_codes,
+            vec!["UNKNOWN_CALL_SHAPE"]
+        );
+
+        // Any other text, including one that asks to be allowed, is still a deny.
+        let mut hoped = p("read");
+        hoped.payload = json!({"binding_fault": "allow"});
+        assert_eq!(
+            evaluate(hoped, policy(), ApprovalSet::default())
+                .unwrap()
+                .reason_codes,
+            vec!["DESCRIPTION_DISAGREEMENT"]
+        );
+
+        // A write that would otherwise wait for a human is denied for the binding fault first.
+        let mut write = p("write");
+        write.payload = json!({"binding_fault": "DESCRIPTION_DISAGREEMENT"});
+        let decision = evaluate(write, policy(), ApprovalSet::default()).unwrap();
+        assert_eq!(decision.verdict, "deny");
+        assert_eq!(decision.reason_codes, vec!["DESCRIPTION_DISAGREEMENT"]);
+    }
+    #[test]
+    fn call_digest_is_covered_by_the_proposal_hash_and_the_receipt_id() {
+        let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut bound = p("read");
+        bound.call_digest = Some(digest.into());
+        let plain = evaluate(p("read"), policy(), ApprovalSet::default()).unwrap();
+        let with_digest = evaluate(bound, policy(), ApprovalSet::default()).unwrap();
+        assert_ne!(plain.proposal_hash, with_digest.proposal_hash);
+
+        let without = issue_receipt(&plain, None, "t".into(), None).unwrap();
+        let with = issue_receipt(&plain, None, "t".into(), Some(digest.into())).unwrap();
+        assert_ne!(without.receipt_id, with.receipt_id);
+        assert_eq!(with.call_digest.as_deref(), Some(digest));
+        assert!(verify_log(&[with.clone().into()]).unwrap());
+        let mut edited = with.clone();
+        edited.call_digest =
+            Some("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into());
+        assert!(!verify_log(&[edited.into()]).unwrap());
+    }
+    #[test]
     fn chain_detects_tamper() {
         let d = evaluate(p("read"), policy(), ApprovalSet::default()).unwrap();
-        let mut r = issue_receipt(&d, None, "x".into()).unwrap();
+        let mut r = issue_receipt(&d, None, "x".into(), None).unwrap();
         assert!(verify_log(&[r.clone().into()]).unwrap());
         r.verdict = "deny".into();
         assert!(!verify_log(&[r.into()]).unwrap());
@@ -913,7 +1001,7 @@ mod tests {
     fn allow_receipt(previous: Option<&LogEntry>, at: &str) -> Receipt {
         let d = evaluate(p("read"), policy(), ApprovalSet::default()).unwrap();
         assert_eq!(d.verdict, "allow");
-        issue_receipt(&d, previous, at.into()).unwrap()
+        issue_receipt(&d, previous, at.into(), None).unwrap()
     }
     const HASH_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1070,7 +1158,9 @@ mod tests {
         ] {
             let decision = evaluate(p(effect), policy(), ApprovalSet::default()).unwrap();
             assert_eq!(decision.verdict, verdict);
-            let held: LogEntry = issue_receipt(&decision, None, "t1".into()).unwrap().into();
+            let held: LogEntry = issue_receipt(&decision, None, "t1".into(), None)
+                .unwrap()
+                .into();
             let outcome = issue_outcome(
                 held.receipt_id(),
                 "completed",

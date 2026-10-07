@@ -14,6 +14,19 @@ Ed25519 key, and the log's length and newest id are recorded in an *anchor* that
 somewhere the log's writer cannot edit. A reader can then tell whether the history they were given is
 the history that was written, and whether it is complete up to the newest anchor.
 
+Five stages sit under that claim. Proposed and authorized are what a receipt proves. Dispatched
+and executed are what executor mode records when a call is sent through the witness
+(`docs/executor-mode.md`). Observed effect is not proved: a completed witness entry means this
+process sent the call and received bytes, not that the target's state changed.
+
+| Stage | Meaning | Proved? |
+|---|---|---|
+| Proposed | A caller described an action | Yes, for requests that go through the gate. The description is hashed |
+| Authorized | The kernel judged that description | Yes. Signed, chained receipt |
+| Dispatched | A concrete call was sent | Only by the witness, and only for calls it actually sends |
+| Executed | The target did it | The witness records the bytes it got back. That is not the target's account of what happened |
+| Observed | An independent party saw the effect | No |
+
 ## What a reader can check, and what they must bring
 
 ```bash
@@ -50,10 +63,17 @@ The reader must supply two things the log cannot supply for itself:
 
 These are real limits, not fine print.
 
-1. **A lie about what is being done.** The kernel judges the description it is given. If the process
-   that calls it says "a harmless read" and then does something else, the log faithfully records the
-   harmless read. The log proves what was *asked* and what the policy *said*, not what *happened*.
-   Outcomes ("completed", the hashes) are the caller's claim; they are signed and chained, not verified.
+1. **A lie about what is being done, when the call does not go through the witness.** The kernel
+   judges the description it is given. If the process that calls it says "a harmless read" and then
+   does something else, the receipt log records the harmless read. Outcomes ("completed", the hashes)
+   on that log are the caller's claim; they are signed and chained, not verified.
+   Executor mode narrows this for one path. The signer, given a concrete `call` of a known shape,
+   derives effect and target and fills in `call_digest`; a disagreement or an unknown shape is a
+   deny (`tests/test_execution_binding.py`). The witness recomputes the digest, requires a chained
+   unused unexpired allow for that digest, consumes the allow, and only then sends the call. A
+   different call is refused and recorded as `mismatch`. This is not observed-effect proof, it is
+   not wired into Nova's HTTP routes, and `infinityctl evaluate` without the signer still trusts
+   the caller's description. See `docs/executor-mode.md`.
 1a. **Who is asking is not checked.** Every proposal has an `actor`, but the kernel never reads it and no policy
    rule can mention it: it is recorded and hashed (so it cannot be edited later), not enforced, and not
    authenticated. Nova names the path that is asking (`nova-shell/model-provider`, `nova-shell/local-model-tool`,
@@ -125,5 +145,7 @@ The verifier prints this with every run, because the word is easy to over-read:
 1. Who holds the signing key, and could the thing being governed read it?
 2. Where is the published anchor, and who checks it against the log, how often?
 3. Where did the trusted-keys file come from, and could the log host change it?
-4. What would an attacker gain by describing an action falsely to the gate? (This system cannot answer that.)
+4. What would an attacker gain by describing an action falsely to the gate? Executor mode answers
+   that only for a call the witness itself sends: a different call is refused. It does not answer
+   it for a call that never reaches the witness, and it does not show what the target did afterward.
 5. What happens to the product if the kernel or signer is unreachable for an hour?

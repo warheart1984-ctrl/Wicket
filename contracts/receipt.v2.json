@@ -59,6 +59,11 @@
       "type": "string",
       "description": "RFC 3339 UTC, e.g. 2026-10-02T10:15:00Z. Supplied by the caller of the kernel; covered by the hash."
     },
+    "call_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Present when the proposal bound a call. Covered by the receipt hash when present, and omitted when it is not, so older receipts keep their ids. The kernel copies it; it does not check it against a call."
+    },
     "key_id": {
       "type": "string",
       "pattern": "^key:sha3-256:[0-9a-f]{64}$",
