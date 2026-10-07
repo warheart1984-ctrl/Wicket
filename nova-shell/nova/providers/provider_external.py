@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 from uuid import uuid4
 
 from nova.errors import ProviderError
 from nova.receipts import make_receipt
+from runtime.call_binding import describe_https
 from .http import post_json
 
 
@@ -17,6 +19,28 @@ class ExternalProvider:
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+
+    def https_call(self, governed_request: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "messages": governed_request.get("messages", []),
+            "temperature": governed_request.get("temperature"),
+            "max_tokens": governed_request.get("max_tokens"),
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        body = json.dumps(payload).encode("utf-8")
+        return describe_https("POST", f"{self.base_url}/chat/completions", headers, body)
+
+    def completion_from_body(self, governed_request: dict[str, Any], body: bytes) -> dict[str, Any]:
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except ValueError as exc:
+            raise ProviderError(code="EXTERNAL_REQUEST_FAILED", message="the provider did not return JSON") from exc
+        if not isinstance(data, dict):
+            raise ProviderError(code="EXTERNAL_REQUEST_FAILED", message="the provider did not return an object")
+        return self._from_provider_json(governed_request, data)
 
     def chat_completion(self, governed_request: dict[str, Any]) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -32,6 +56,9 @@ class ExternalProvider:
             raise
         except Exception as exc:
             raise ProviderError(code="EXTERNAL_REQUEST_FAILED", message=str(exc)) from exc
+        return self._from_provider_json(governed_request, data)
+
+    def _from_provider_json(self, governed_request: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         completion = {
             "id": data.get("id", f"external-{uuid4()}"),
             "object": "chat.completion",

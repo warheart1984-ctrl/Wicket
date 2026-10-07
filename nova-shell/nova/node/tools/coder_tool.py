@@ -32,6 +32,7 @@ Return ONLY the complete updated file. No explanations, no markdown fences outsi
     updated_code = _strip_markdown_fences(
         generate(
             prompt,
+            tool="code",
             model=str(task.get("model") or "qwen2.5-coder:3b"),
             temperature=float(task.get("temperature", 0.15)),
             max_tokens=int(task.get("max_tokens", 4096)),

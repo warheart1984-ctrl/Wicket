@@ -7,8 +7,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from runtime.call_binding import bind_proposal, derive, describe_https
 from runtime.kernel import Decision, Kernel, KernelError, sha256_text
-from runtime.providers import Client, complete
+from runtime.providers import Client, ProviderError, complete, prepared_request
+from runtime.witness import Witness
 
 
 @dataclass(frozen=True)
@@ -38,8 +40,6 @@ def build_proposal(provider: str, message: str, policy_version: str) -> dict[str
 
 
 def policy_version_of(kernel: Kernel) -> str:
-    import json
-
     return json.loads(kernel.policy.read_text())["policy_id"]
 
 
@@ -51,16 +51,43 @@ def run_turn(
     history: list[dict[str, str]] | None = None,
     client: Client | None = None,
     max_tokens: int = 512,
+    witness: Witness | None = None,
 ) -> TurnResult:
+    """One turn. With ``witness``, the provider is called only from that witness's dispatch.
+
+    Without a witness this still calls the provider after the kernel allows it. That is the
+    runtime helper's existing opt-in: ``python -m runtime`` does not attach a witness. Nova's
+    HTTP gate (``NOVA_ICK_POLICY``) does not have that fallback.
+    """
+    messages = list(history or []) + [{"role": "user", "content": message}]
     proposal = build_proposal(provider, message, policy_version_of(kernel))
+    if witness is not None:
+        url, payload, headers = prepared_request(provider, messages, max_tokens=max_tokens)
+        call = describe_https("POST", url, headers, json.dumps(payload).encode("utf-8"))
+        derived = derive(call)
+        proposal["effect"] = derived.effect
+        proposal["target"] = derived.target
+        proposal = bind_proposal(proposal, call)
+    else:
+        call = None
     decision: Decision = kernel.evaluate(proposal)
     receipt_id = str(decision.receipt.get("receipt_id"))
     if not decision.allowed:
         return TurnResult(decision.verdict, decision.reason_codes, receipt_id, None)
-    messages = list(history or []) + [{"role": "user", "content": message}]
     request_sha = sha256_text(json.dumps([m["content"] for m in messages]))
     try:
-        reply = complete(provider, messages, max_tokens=max_tokens, client=client)
+        if witness is None:
+            reply = complete(provider, messages, max_tokens=max_tokens, client=client)
+        else:
+            assert call is not None
+            sent = witness.execute(call, receipt_id)
+            if not sent.dispatched or sent.status == "failed":
+                raise ProviderError(sent.error or sent.divergence or "the witness did not send the call")
+            parsed = json.loads((sent.body or b"{}").decode("utf-8"))
+            choice = (parsed.get("choices") or [{}])[0]
+            reply = str((choice.get("message") or {}).get("content") or "").strip()
+            if not reply:
+                raise ProviderError(f"{provider} returned no text")
     except Exception:
         try:  # the real error matters more; a missing record shows up as "allowed without an outcome"
             kernel.record_outcome(receipt_id, status="failed", request_sha256=request_sha)

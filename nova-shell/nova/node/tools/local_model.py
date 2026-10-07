@@ -4,34 +4,60 @@ import json
 import os
 import urllib.request
 
-from nova.ick import gate_action, gate_outcome
+from nova.errors import ProviderError
+from nova.ick import IckGate, KernelRefusal, gate_outcome
 
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 DEFAULT_VLLM_URL = "http://localhost:8000/v1/completions"
 DEFAULT_CODER_MODEL = "qwen2.5-coder:3b"
+_READ_TOOLS = {"explain", "status"}
+_WRITE_TOOLS = {"code", "wire"}
 
 
-def generate(prompt: str, *, model: str | None = DEFAULT_CODER_MODEL, temperature: float = 0.2, max_tokens: int = 2048) -> str:
+def generate(
+    prompt: str,
+    *,
+    tool: str = "explain",
+    model: str | None = DEFAULT_CODER_MODEL,
+    temperature: float = 0.2,
+    max_tokens: int = 2048,
+) -> str:
     active_model = model or DEFAULT_CODER_MODEL
-    # One kernel check covers the Ollama attempt and the vLLM fallback below.
-    ick = gate_action(
-        target=f"local_model:{active_model}",
+    gate = IckGate.from_env()
+    if gate is None:
+        return _direct(prompt, active_model, temperature, max_tokens)
+    if tool not in _READ_TOOLS and tool not in _WRITE_TOOLS:
+        raise KernelRefusal(code="UNKNOWN_CALL_SHAPE", message=f"tool {tool!r} is not a known local model tool")
+    call = {
+        "shape": "local_model_tool",
+        "tool": tool,
+        "arguments": {
+            "max_tokens": max_tokens,
+            "model": active_model,
+            "prompt": prompt,
+            "temperature": temperature,
+        },
+    }
+    reply, ick = gate.run_witnessed(
+        call,
         action="chat_completion",
-        effect="read",
         source="local-model-tool",
         governed_request={"messages": [{"role": "user", "content": prompt}]},
     )
-    try:
-        try:
-            text = _ollama_generate(prompt, active_model, temperature, max_tokens)
-        except Exception:
-            text = _vllm_generate(prompt, active_model, temperature, max_tokens)
-    except BaseException:
+    if reply.status == "failed":
         gate_outcome(ick, status="failed", strict=False)
-        raise
+        raise OSError(reply.error or "the witness could not run the local model tool")
+    text = (reply.body or b"").decode("utf-8")
     gate_outcome(ick, status="completed", response_text=text)
     return text
+
+
+def _direct(prompt: str, model: str, temperature: float, max_tokens: int) -> str:
+    try:
+        return _ollama_generate(prompt, model, temperature, max_tokens)
+    except Exception:
+        return _vllm_generate(prompt, model, temperature, max_tokens)
 
 
 def _ollama_generate(prompt: str, model: str, temperature: float, max_tokens: int) -> str:
@@ -58,6 +84,11 @@ def _vllm_generate(prompt: str, model: str, temperature: float, max_tokens: int)
 
 
 def _post_json(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+    if (os.environ.get("NOVA_ICK_POLICY") or "").strip() or (os.environ.get("NOVA_ICK_SERVICE") or "").strip():
+        raise ProviderError(
+            code="WITNESS_REQUIRED",
+            message="the gate is on; the local model tool is sent by the witness, not by this client",
+        )
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),

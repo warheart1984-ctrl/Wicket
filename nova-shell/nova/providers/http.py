@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any, Iterator
@@ -11,6 +12,18 @@ from nova.errors import ProviderError
 USER_AGENT = "infinity-core-nova/0.1"
 
 
+def _gate_is_on() -> bool:
+    return bool((os.environ.get("NOVA_ICK_POLICY") or "").strip() or (os.environ.get("NOVA_ICK_SERVICE") or "").strip())
+
+
+def _refuse_direct() -> None:
+    if _gate_is_on():
+        raise ProviderError(
+            code="WITNESS_REQUIRED",
+            message="the gate is on; a known-shape HTTP call is sent by the witness, not by this client",
+        )
+
+
 def post_json(
     url: str,
     payload: dict[str, Any],
@@ -18,6 +31,7 @@ def post_json(
     timeout: float,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    _refuse_direct()
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -38,6 +52,7 @@ def post_json(
 
 
 def post_json_lines(url: str, payload: dict[str, Any], *, timeout: float) -> Iterator[bytes]:
+    _refuse_direct()
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),

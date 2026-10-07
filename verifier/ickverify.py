@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check an Infinity receipt log without trusting Nova, the kernel binary, or anything else that wrote it.
 
-    python ickverify.py LOG [--anchor ANCHOR] [--trusted-keys KEYS] [--require-signatures] [--json]
+    python ickverify.py LOG [--anchor ANCHOR] [--trusted-keys KEYS] [--require-signatures]
+        [--call CALL.json] [--witness-log WITNESS] [--witness-keys KEYS] [--json]
 
 This is one file with no dependencies beyond the Python standard library (3.8 or newer). It does
 not call `infinityctl`: it recomputes every hash and checks every Ed25519 signature itself, so a
@@ -17,10 +18,11 @@ What "verified" means, and does not mean, is printed at the end of every run. Th
     and, with trusted keys, that each entry was signed by a key you trust.
   * Deleting the newest entries is only caught if you pass an anchor that the log's writer could
     not edit (a copy you fetched yourself from the published anchor repository).
-  * It does NOT show that what was done matched what was asked. A receipt may carry a call_digest;
-    this program checks that the field is covered by the hash when it is present. It does not
-    recompute that digest from a call, and it does not read a witness log. It also does not show
-    that the clock was right, or that a signing key was never stolen.
+  * It does NOT show that what was done matched what was asked, in the sense of observed effect.
+    When you pass ``--call``, it recomputes ``call_digest`` from that concrete call and fails if
+    the allow's digest was forged or omitted. It cannot invent the call from a digest. With
+    ``--witness-log`` it joins executions to allows. It does not show that the clock was right,
+    or that a signing key was never stolen.
 
 Exit status: 0 verified, 1 not verified, 2 the inputs could not be read.
 """
@@ -28,6 +30,7 @@ Exit status: 0 verified, 1 not verified, 2 the inputs could not be read.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import sys
@@ -37,6 +40,9 @@ RECEIPT_V1 = "infinity.receipt.v1"
 RECEIPT_V2 = "infinity.receipt.v2"
 OUTCOME_V1 = "infinity.outcome.v1"
 ANCHOR_V1 = "infinity.anchor.v1"
+WITNESS_EXECUTION = "infinity.witness.execution.v1"
+WITNESS_DIVERGENCE = "infinity.witness.divergence.v1"
+_CALL_PREFIX = b"wicket-call/v1\n"
 ENTRY_DOMAIN = "infinity-core/entry/v1"
 ANCHOR_DOMAIN = "infinity-core/anchor/v1"
 PUBLIC_PREFIX = "ed25519-public:"
@@ -440,8 +446,330 @@ def check_anchors(entries: List[Dict[str, Any]], text: str, keys: Optional[Trust
     return None, checked, covered
 
 
+# --- call_digest, a second implementation of runtime/call_binding.py (stdlib only) ------------
+#
+# This does not import the runtime. The two are checked against each other. It recomputes a
+# digest only from a call you supply. A digest alone is not enough to rebuild the call.
+
+class CallShapeError(Exception):
+    """The supplied call is not a shape this verifier can digest."""
+
+
+_HTTPS_KEYS = {
+    "shape", "method", "scheme", "host", "port", "path", "query", "headers",
+    "authorization_present", "body", "body_b64",
+}
+_TOOL_KEYS = {"shape", "tool", "arguments"}
+_READ_METHODS = {"GET", "HEAD"}
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_HEADER_NAMES = ("content-type", "content-encoding", "authorization")
+
+
+def _length_prefixed(parts: List[bytes]) -> bytes:
+    out = bytearray()
+    for part in parts:
+        if len(part) > 0xFFFFFFFF:
+            raise CallShapeError("a call field is too long to bind")
+        out += len(part).to_bytes(4, "big")
+        out += part
+    return _CALL_PREFIX + bytes(out)
+
+
+def _call_text(value: Any, what: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise CallShapeError(f"{what} must be text")
+    return value
+
+
+def _call_headers(raw: Any) -> Dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise CallShapeError("headers must be an object")
+    found: Dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise CallShapeError("header names and values must be text")
+        name = key.lower()
+        if name not in _HEADER_NAMES or name in found:
+            raise CallShapeError("unknown or repeated header")
+        if value == "" or any(char in value for char in "\r\n"):
+            raise CallShapeError("empty or broken header value")
+        found[name] = value
+    return found
+
+
+def _call_body(call: Dict[str, Any]) -> bytes:
+    has_text, has_b64 = "body" in call, "body_b64" in call
+    if has_text and has_b64:
+        raise CallShapeError("send body or body_b64, not both")
+    if has_text:
+        text = call["body"]
+        if not isinstance(text, str):
+            raise CallShapeError("body must be text")
+        return text.encode("utf-8")
+    if has_b64:
+        encoded = call["body_b64"]
+        if not isinstance(encoded, str):
+            raise CallShapeError("body_b64 must be text")
+        try:
+            return base64.b64decode(encoded, validate=True)
+        except ValueError as exc:
+            raise CallShapeError("body_b64 is not base64") from exc
+    return b""
+
+
+def call_digest(call: Any) -> str:
+    """``sha256:<64 hex>`` over the same bytes ``runtime/call_binding.py`` hashes.
+
+    Raises CallShapeError for a shape, field, or encoding that implementation refuses.
+    """
+    if not isinstance(call, dict):
+        raise CallShapeError("call must be an object")
+    shape = call.get("shape")
+    if shape == "https_request":
+        if set(call) - _HTTPS_KEYS:
+            raise CallShapeError("https_request has a field this registry does not know")
+        method = _call_text(call.get("method"), "method").upper()
+        if method not in _READ_METHODS and method not in _WRITE_METHODS:
+            raise CallShapeError("method is not one this registry derives")
+        scheme = _call_text(call.get("scheme"), "scheme").lower()
+        if scheme not in ("http", "https"):
+            raise CallShapeError("scheme must be http or https")
+        host = _call_text(call.get("host"), "host")
+        if any(char in host for char in ":/?#@ \t\r\n"):
+            raise CallShapeError("host is not a name this registry can bind")
+        host = host.lower()
+        port = call.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise CallShapeError("port must be an integer from 1 to 65535")
+        path = _call_text(call.get("path"), "path")
+        if not path.startswith("/") or any(char in path for char in "?# \t\r\n"):
+            raise CallShapeError("path must start with / and carry no query")
+        query = call.get("query", "")
+        if not isinstance(query, str) or any(char in query for char in "?# \t\r\n"):
+            raise CallShapeError("query must be text without a leading ?")
+        headers = _call_headers(call.get("headers"))
+        present = call.get("authorization_present", False)
+        if not isinstance(present, bool):
+            raise CallShapeError("authorization_present must be true or false")
+        if present != ("authorization" in headers):
+            raise CallShapeError("authorization presence does not match the header")
+        parts = [
+            b"https_request", method.encode("utf-8"), scheme.encode("utf-8"), host.encode("utf-8"),
+            str(port).encode("ascii"), path.encode("utf-8"), query.encode("utf-8"),
+            headers.get("content-type", "").encode("utf-8"),
+            headers.get("content-encoding", "").encode("utf-8"),
+            b"1" if present else b"0", _call_body(call),
+        ]
+    elif shape == "local_model_tool":
+        if set(call) - _TOOL_KEYS:
+            raise CallShapeError("local_model_tool has a field this registry does not know")
+        tool = _call_text(call.get("tool"), "tool")
+        if any(char in tool for char in ":/?# \t\r\n"):
+            raise CallShapeError("tool name cannot be bound")
+        if tool not in ("explain", "status", "code", "wire"):
+            raise CallShapeError("tool is not one this registry derives")
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            raise CallShapeError("arguments must be an object")
+        try:
+            encoded = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise CallShapeError("arguments are not JSON") from exc
+        parts = [b"local_model_tool", tool.encode("utf-8"), encoded.encode("utf-8")]
+    else:
+        raise CallShapeError("call shape is not in the registry")
+    return "sha256:" + hashlib.sha256(_length_prefixed(parts)).hexdigest()
+
+
+def read_call_binds(text: str) -> List[Dict[str, Any]]:
+    """``{"receipt_id", "call"}`` or a list of those. The call is not stored in the receipt log."""
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise Problem(f"the call file is not JSON: {exc}") from exc
+    if isinstance(raw, dict) and "call" in raw:
+        items: Any = [raw]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        raise Problem("the call file must be {receipt_id, call} or a list of those")
+    binds = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("receipt_id"), str) or "call" not in item:
+            raise Problem("each call binding needs receipt_id and call")
+        binds.append({"receipt_id": item["receipt_id"], "call": item["call"]})
+    return binds
+
+
+def _witness_material(entry: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "version": entry["version"],
+        "previous_receipt_hash": entry["previous_receipt_hash"],
+        "allow_receipt_id": entry["allow_receipt_id"],
+        "call_digest": entry["call_digest"],
+        "attempt": entry["attempt"],
+        "status": entry["status"],
+        "divergence": entry["divergence"],
+        "issued_at": entry["issued_at"],
+    }
+
+
+def parse_witness_entry(line: str) -> Dict[str, Any]:
+    raw = _load_json_line(line)
+    if not isinstance(raw, dict):
+        raise ValueError("a witness entry must be a JSON object")
+    attempt = raw.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int):
+        raise ValueError("attempt must be an integer")
+    return {
+        "version": _req_str(raw, "version"),
+        "receipt_id": _req_str(raw, "receipt_id"),
+        "previous_receipt_hash": _opt_str(raw, "previous_receipt_hash"),
+        "allow_receipt_id": _opt_str(raw, "allow_receipt_id"),
+        "call_digest": _opt_str(raw, "call_digest"),
+        "attempt": attempt,
+        "status": _opt_str(raw, "status"),
+        "divergence": _opt_str(raw, "divergence"),
+        "issued_at": _req_str(raw, "issued_at"),
+        "key_id": _opt_str(raw, "key_id"),
+        "signature": _opt_str(raw, "signature"),
+    }
+
+
+def read_witness_log(text: str) -> List[Dict[str, Any]]:
+    entries = []
+    for number, line in enumerate(_lines(text), 1):
+        if not line.strip():
+            continue
+        try:
+            entries.append(parse_witness_entry(line))
+        except ValueError as exc:
+            raise Problem(f"witness log line {number}: {exc}")
+    return entries
+
+
+def read_witness_keys(text: str) -> TrustedKeys:
+    """Trusted witness keys. A ``through`` cutoff is refused, matching ``witness-verify``."""
+    keys = read_trusted_keys(text)
+    if keys.cutoffs:
+        raise Problem("witness-verify does not honor `through` cutoffs; refusing a key file that uses them")
+    return keys
+
+
+def check_witness_chain(entries: List[Dict[str, Any]]) -> Optional[str]:
+    for index, entry in enumerate(entries):
+        number = index + 1
+        if entry["version"] not in (WITNESS_EXECUTION, WITNESS_DIVERGENCE):
+            return f"witness entry {number}: unknown version"
+        expected = "witness:" + hash_value(_witness_material(entry))
+        if entry["receipt_id"] != expected:
+            return f"witness entry {number}: its id does not match its contents"
+        previous = entries[index - 1]["receipt_id"] if index else None
+        if entry["previous_receipt_hash"] != previous:
+            return f"witness entry {number}: it does not follow the entry before it"
+    return None
+
+
+def check_witness_signatures(entries: List[Dict[str, Any]], keys: TrustedKeys) -> Optional[str]:
+    for index, entry in enumerate(entries):
+        number = index + 1
+        key_id, signature = entry["key_id"], entry["signature"]
+        if key_id is None or signature is None:
+            return f"witness entry {number}: not signed"
+        if key_id not in keys:
+            return f"witness entry {number}: signed by a key that is not trusted ({key_id})"
+        if not _signature_ok(keys, key_id, _entry_message(key_id, entry["receipt_id"]), signature):
+            return f"witness entry {number}: its signature does not verify"
+    return None
+
+
+def _decision_by_id(entries: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    found = {}
+    for entry in entries:
+        if entry["kind"] == "decision":
+            found[entry["receipt_id"]] = entry
+    return found
+
+
+def call_bind_problems(entries: List[Dict[str, Any]], binds: List[Dict[str, Any]],
+                       witness_entries: Optional[List[Dict[str, Any]]]) -> List[str]:
+    """Forged or omitted digests, and execution digests that disagree with the recomputed call."""
+    problems = []
+    decisions = _decision_by_id(entries)
+    executions = [row for row in (witness_entries or []) if row["version"] == WITNESS_EXECUTION]
+    for bind in binds:
+        receipt_id, call = bind["receipt_id"], bind["call"]
+        try:
+            digest = call_digest(call)
+        except CallShapeError as exc:
+            problems.append(f"call for {receipt_id} is not a known shape ({exc})")
+            continue
+        decision = decisions.get(receipt_id)
+        if decision is None:
+            problems.append(f"call for {receipt_id} does not name a receipt in this log")
+            continue
+        if "call_digest" not in decision:
+            problems.append(f"omitted call_digest: bound call has no call_digest on the allow {receipt_id}")
+        elif decision["call_digest"] != digest:
+            problems.append(f"forged call_digest: receipt {receipt_id} does not match the concrete call")
+        for row in executions:
+            if row.get("allow_receipt_id") == receipt_id and row.get("call_digest") != digest:
+                problems.append(
+                    f"mismatch: execution digest does not match the recomputed call for {receipt_id}"
+                )
+    return problems
+
+
+def witness_join_problems(entries: List[Dict[str, Any]], witness_entries: List[Dict[str, Any]]) -> List[str]:
+    """Join by allow receipt id. Late is whatever the witness recorded; this invents no clock."""
+    problems = []
+    decisions = _decision_by_id(entries)
+    started: Dict[str, int] = {}
+    executed = set()
+    for row in witness_entries:
+        allow_id = row.get("allow_receipt_id")
+        if row["version"] == WITNESS_DIVERGENCE:
+            kind = row.get("divergence")
+            if kind == "mismatch":
+                problems.append(f"mismatch: divergence for {allow_id}")
+            elif kind == "unauthorized":
+                problems.append(f"unauthorized: divergence for {allow_id}")
+            elif kind == "reused":
+                problems.append(f"reused: divergence for {allow_id}")
+            elif kind == "late":
+                problems.append(f"late: divergence for {allow_id}")
+            else:
+                problems.append(f"witness divergence {kind!r} for {allow_id}")
+            continue
+        if row["version"] != WITNESS_EXECUTION:
+            continue
+        if row.get("status") == "started":
+            if isinstance(allow_id, str):
+                started[allow_id] = started.get(allow_id, 0) + 1
+                executed.add(allow_id)
+        decision = decisions.get(allow_id) if isinstance(allow_id, str) else None
+        if decision is None or decision.get("verdict") != "allow":
+            problems.append(f"unauthorized: execution with no allow ({allow_id})")
+            continue
+        allow_digest = decision.get("call_digest")
+        if allow_digest is None or row.get("call_digest") != allow_digest:
+            problems.append(f"mismatch: execution digest differs from the allow {allow_id}")
+    for allow_id, count in started.items():
+        if count > 1:
+            problems.append(f"reused: allow {allow_id} has more than one execution")
+    for entry in entries:
+        if entry["kind"] != "decision" or entry.get("verdict") != "allow" or "call_digest" not in entry:
+            continue
+        if entry["receipt_id"] not in executed:
+            problems.append(f"missing execution: bound allow {entry['receipt_id']} has no execution")
+    return problems
+
+
 def verify(log_text: str, anchor_text: Optional[str] = None, trusted_keys_text: Optional[str] = None,
-           require_signatures: bool = False) -> Dict[str, Any]:
+           require_signatures: bool = False, call_text: Optional[str] = None,
+           witness_log_text: Optional[str] = None, witness_keys_text: Optional[str] = None) -> Dict[str, Any]:
     """Run every check. Returns a report; `report["ok"]` is the verdict. Raises Problem for unreadable input."""
     if require_signatures and trusted_keys_text is None:
         raise Problem("--require-signatures needs --trusted-keys")
@@ -492,6 +820,23 @@ def verify(log_text: str, anchor_text: Optional[str] = None, trusted_keys_text: 
                         f"{entries[next(i for i, e in enumerate(entries) if e['extra'])]['extra'][0]!r}): "
                         "the kernel accepts them, but they prove nothing")
 
+    witness_entries: Optional[List[Dict[str, Any]]] = None
+    if witness_log_text is not None:
+        witness_entries = read_witness_log(witness_log_text)
+        chain_problem = check_witness_chain(witness_entries)
+        if chain_problem:
+            errors.append(chain_problem)
+        if witness_keys_text is not None:
+            witness_keys = read_witness_keys(witness_keys_text)
+            signature_problem = check_witness_signatures(witness_entries, witness_keys)
+            if signature_problem:
+                errors.append(signature_problem)
+        else:
+            warnings.append("no witness keys were given, so witness signatures were not checked")
+        errors.extend(witness_join_problems(entries, witness_entries))
+    if call_text is not None:
+        errors.extend(call_bind_problems(entries, read_call_binds(call_text), witness_entries))
+
     decisions = sum(1 for e in entries if e["kind"] == "decision")
     verdicts: Dict[str, int] = {}
     for e in entries:
@@ -510,6 +855,7 @@ def verify(log_text: str, anchor_text: Optional[str] = None, trusted_keys_text: 
         "anchor_records": anchor_records,
         "anchor_covers_entries": anchor_covers,
         "head_receipt_id": entries[-1]["receipt_id"] if entries else None,
+        "witness_entries": None if witness_entries is None else len(witness_entries),
     }
 
 
@@ -518,13 +864,19 @@ What this does and does not show
   - It shows the entries are unchanged since they were written, in order, with none inserted or
     removed in the middle (and none cut from the end, if the anchor you gave is genuine and current).
   - With trusted keys, it shows each entry was signed by a holder of a key you chose to trust.
-  - It does NOT show that what was done matched what was asked. A receipt may carry a call_digest;
-    that field is covered by the hash when it is present. This program does not recompute the digest
-    from a call, and it does not read a witness log. An outcome is still the caller's claim. It does
-    not show that the clock was right, or that a signing key was never stolen. An empty or unsigned
-    log can still "verify".
+  - It does NOT show that what was done matched what was asked. Observed effect is not proved.
+    A receipt may carry a call_digest; that field is covered by the hash when it is present.
+    With --call, this program recomputes the digest from the concrete call you supply and fails
+    if the allow's digest was forged or omitted. It cannot invent the call from a digest alone.
+    The receipt log and the witness log do not store the call body. With --witness-log it joins
+    executions to allows (mismatch, unauthorized, reused, late, missing execution) and reports
+    divergence entries of those kinds. It does not apply `through` cutoffs to the witness log;
+    a witness key file that uses one is refused. It does not require a heartbeat. An outcome on
+    the receipt log is still the caller's claim. It does not show that the clock was right, or
+    that a signing key was never stolen. An empty or unsigned log can still "verify".
   - The anchor and the trusted keys must come from somewhere the log's writer cannot edit. A copy that
-    sits next to the log proves nothing about deleted entries."""
+    sits next to the log proves nothing about deleted entries. Witness keys are the same: they are
+    not taken from the witness log."""
 
 
 def render(report: Dict[str, Any]) -> str:
@@ -559,6 +911,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--trusted-keys", help="a file of ed25519-public:<hex> lines you chose to trust")
     parser.add_argument("--require-signatures", action="store_true",
                         help="every entry and anchor record must be signed (needs --trusted-keys)")
+    parser.add_argument("--call", help="JSON file of {receipt_id, call} bindings; the digest is recomputed from each call")
+    parser.add_argument("--witness-log", help="the witness log to join to allows by receipt id")
+    parser.add_argument("--witness-keys", help="ed25519-public keys for the witness log; `through` cutoffs are refused")
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     args = parser.parse_args(argv)
     try:
@@ -567,6 +922,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             _read(args.anchor, "anchor") if args.anchor else None,
             _read(args.trusted_keys, "trusted keys") if args.trusted_keys else None,
             args.require_signatures,
+            _read(args.call, "call file") if args.call else None,
+            _read(args.witness_log, "witness log") if args.witness_log else None,
+            _read(args.witness_keys, "witness keys") if args.witness_keys else None,
         )
     except Problem as exc:
         print(f"cannot check: {exc}", file=sys.stderr)

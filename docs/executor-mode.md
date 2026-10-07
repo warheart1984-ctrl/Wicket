@@ -2,9 +2,17 @@
 
 Executor mode is the witness in `runtime/witness.py`. Nova hands it a concrete call and an allow
 receipt id. The witness decides whether that call may run, and it is the component that performs
-the call. Nova's existing HTTP routes are not wired through it. A caller who can still reach the
-target without the witness is outside this control. That is a deployment limit, not something
-this code enforces.
+the call. When Nova's gate is on (`NOVA_ICK_POLICY` or `NOVA_ICK_SERVICE`), a known shape is sent
+by the witness or not sent at all. Nova does not hold the witness signing key: `NOVA_ICK_WITNESS`
+is the socket of `python -m runtime.witness_service`, which owns that key and the witness log.
+A provider chat is an HTTP POST, so the derived effect is `write`. A policy that allows only
+reads will not let that call through.
+
+A caller who can still reach the target without the witness is outside this control. That is a
+deployment limit (egress), not something this code enforces. Gossip between nodes is still the
+older description-only gate. `python -m runtime` still calls the provider after the kernel allows
+it, unless `run_turn` is given a witness. Streaming a known-shape provider call is refused while
+the gate is on: the witness binds one request body, not a stream.
 
 ## What it checks
 
@@ -71,16 +79,29 @@ caller's claim.
 
 HTTP dispatch uses `http.client` and does not follow redirects.
 
+## What the verifier checks
+
+`verifier/ickverify.py` is a second implementation of `call_digest` (standard library only; it
+does not import `runtime/`). It recomputes the digest only when you pass `--call` with the
+concrete call. The receipt log and the witness log do not store the call body, so the verifier
+cannot invent the call from a digest. A forged `call_digest`, or a bound call whose allow omits
+`call_digest`, fails verification.
+
+`--witness-log` joins executions to allows by receipt id. It reports mismatch, unauthorized,
+reused, late, and a bound allow with no execution, and it surfaces divergence entries of those
+kinds. `--witness-keys` checks signatures. A witness key file that uses `through` is refused.
+The verifier does not apply that cutoff, and it does not look for a heartbeat. Late means the
+witness recorded `late`; this program does not invent a second clock.
+
+`User-Agent` is sent on HTTPS calls and is not part of the digest. The authorization header's
+value is sent and not hashed; only its presence is. `risk` and `action` are still the caller's
+claim.
+
 ## What this does not prove
 
 - **Observed effect.** A `completed` entry means this process sent the call and received bytes.
   It does not prove the target changed, or that those bytes are what a third party would have
   seen.
-- **A second digest implementation.** Only `runtime/call_binding.py` computes `call_digest`.
-  `verifier/ickverify.py` checks that a digest present on a receipt is inside the receipt hash.
-  It does not recompute the digest, and it does not read the witness log.
-- **Nova's routes.** Nothing in the HTTP API was switched over to the witness. Skipping the
-  witness is still possible wherever the caller can reach the target.
 - **Account separation.** These tests run the signer and the witness in one process, with two
   keys. They do not probe two operating-system accounts the way the signer service's account
   test does.
@@ -90,4 +111,6 @@ HTTP dispatch uses `http.client` and does not follow redirects.
 - **A taken-over witness.** Someone who holds the witness key can sign a false execution. The
   split moves trust off Nova. It does not remove it.
 - **Egress.** The guarantee holds only when the target cannot be reached except through the
-  witness.
+  witness. That restriction is deployment, not code.
+- **The runtime CLI.** `run_turn` without a witness still calls the provider. Nova's gate does not.
+- **Gossip.** Peer gossip is not a shape this wiring sends through the witness.

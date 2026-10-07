@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import executor_setup
 from nova.ick import IckGate, IckGatedProvider, KernelRefusal, _find_binary
 
 REPO = Path(__file__).resolve().parents[2]
@@ -184,12 +185,22 @@ def _count_calls(monkeypatch, module, names):
     return calls
 
 
-def test_local_model_tool_is_gated(monkeypatch, deny_policy):
+def test_local_model_tool_is_gated(monkeypatch, deny_policy, tmp_path):
     from nova.node.tools import local_model
 
     calls = _count_calls(monkeypatch, local_model, ["_ollama_generate", "_vllm_generate"])
     monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))
-    assert local_model.generate("hello") == "generated" and calls == ["_ollama_generate"]
+
+    def dispatch(bound):
+        args = json.loads(bound.arguments_json)
+        try:
+            text = local_model._ollama_generate(args["prompt"], args["model"], args["temperature"], args["max_tokens"])
+        except Exception:
+            text = local_model._vllm_generate(args["prompt"], args["model"], args["temperature"], args["max_tokens"])
+        return str(text).encode("utf-8")
+
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+        assert local_model.generate("hello") == "generated" and calls == ["_ollama_generate"]
     monkeypatch.setenv("NOVA_ICK_POLICY", str(deny_policy))
     with pytest.raises(KernelRefusal) as err:
         local_model.generate("hello")
@@ -206,11 +217,17 @@ def test_local_model_tool_is_unchanged_when_the_gate_is_off(monkeypatch):
 
 
 @pytest.mark.parametrize("intent", ["code", "wire", "explain"])
-def test_every_node_tool_returns_403_when_the_kernel_denies(client, monkeypatch, deny_policy, intent):
+def test_every_node_tool_returns_403_when_the_kernel_denies(client, monkeypatch, tmp_path, intent):
     from nova.node.tools import local_model
 
+    # code and wire derive as writes; explain derives as a read. Deny both.
+    policy = tmp_path / "deny.json"
+    policy.write_text(json.dumps({
+        "version": "infinity.policy.v1", "policy_id": "policy-deny-v1",
+        "denied_effects": ["read", "write"], "effects_requiring_approval": [],
+    }))
     calls = _count_calls(monkeypatch, local_model, ["_ollama_generate", "_vllm_generate"])
-    monkeypatch.setenv("NOVA_ICK_POLICY", str(deny_policy))
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
     response = client.post("/node/tool", json={"intent": intent, "instruction": "x", "current_code": "y"})
     assert response.status_code == 403, response.text
     assert response.json()["error"]["code"] == "KERNEL_DENIED"
@@ -312,14 +329,19 @@ def test_each_path_through_the_gate_names_itself_as_the_actor(monkeypatch, tmp_p
     seen = []
     real_run = IckGate._run
 
-    def spy(self, proposal, approval_ids):
+    def spy(self, proposal, approval_ids, call=None):
         seen.append((proposal["action"], proposal["actor"]))
-        return real_run(self, proposal, approval_ids)
+        return real_run(self, proposal, approval_ids, call)
 
     monkeypatch.setattr(IckGate, "_run", spy)
     allow = tmp_path / "allow.json"
     allow.write_text(json.dumps({"version": "infinity.policy.v1", "policy_id": "policy-allow-v1"}))
     monkeypatch.setenv("NOVA_ICK_POLICY", str(allow))
+    def dispatch(bound):
+        args = json.loads(bound.arguments_json)
+        return str(local_model._ollama_generate(
+            args["prompt"], args["model"], args["temperature"], args["max_tokens"],
+        )).encode("utf-8")
 
     # 1. a model call through the provider wrapper
     class Provider:
@@ -328,9 +350,10 @@ def test_each_path_through_the_gate_names_itself_as_the_actor(monkeypatch, tmp_p
             return {"completion": {"id": "c", "model": "m", "created": 1, "choices": [
                 {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}]}, "receipt": {}}
     IckGatedProvider(Provider(), IckGate.from_env()).chat_completion({"messages": [{"role": "user", "content": "hi"}]})
-    # 2. the local-model tool
+    # 2. the local-model tool (the witness dispatches; Nova does not call the tool itself)
     monkeypatch.setattr(local_model, "_ollama_generate", lambda *a, **k: "text")
-    local_model.generate("hello")
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+        local_model.generate("hello")
     # 3. gossip
     class Response:
         status = 200

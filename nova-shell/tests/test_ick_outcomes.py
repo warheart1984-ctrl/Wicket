@@ -9,7 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import executor_setup
 import pytest
+from nova.node.tools import local_model
 
 from nova.ick import (IckGate, IckGatedProvider, KernelRefusal, OutcomeNotRecorded, _find_binary,
                       gate_action, gate_outcome, sha256_text)
@@ -145,22 +147,29 @@ def test_the_async_path_records_an_outcome_too(paths):
 
 
 def test_the_local_model_tool_records_an_outcome(monkeypatch, paths):
-    from nova.node.tools import local_model
-
     monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))
     monkeypatch.setenv("NOVA_ICK_LOG", str(paths["log"]))
     monkeypatch.setenv("NOVA_ICK_ANCHOR", str(paths["anchor"]))
     monkeypatch.setattr(local_model, "_ollama_generate", lambda *a, **k: "generated code")
-    assert local_model.generate("write it") == "generated code"
-    assert entries(paths)[1]["response_sha256"] == sha256_text("generated code")
+
+    def dispatch(bound):
+        args = json.loads(bound.arguments_json)
+        try:
+            text = local_model._ollama_generate(args["prompt"], args["model"], args["temperature"], args["max_tokens"])
+        except Exception:
+            text = local_model._vllm_generate(args["prompt"], args["model"], args["temperature"], args["max_tokens"])
+        return str(text).encode("utf-8")
 
     def boom(*a, **k):
         raise OSError("no server")
 
-    monkeypatch.setattr(local_model, "_ollama_generate", boom)
-    monkeypatch.setattr(local_model, "_vllm_generate", boom)
-    with pytest.raises(OSError):
-        local_model.generate("write it again")
+    with executor_setup.install_witness(monkeypatch, paths["dir"], dispatch, anchor=str(paths["anchor"])):
+        assert local_model.generate("write it") == "generated code"
+        assert entries(paths)[1]["response_sha256"] == sha256_text("generated code")
+        monkeypatch.setattr(local_model, "_ollama_generate", boom)
+        monkeypatch.setattr(local_model, "_vllm_generate", boom)
+        with pytest.raises(OSError):
+            local_model.generate("write it again")
     assert [e.get("status") for e in entries(paths) if "status" in e] == ["completed", "failed"]
     assert verify(paths)[0]
 

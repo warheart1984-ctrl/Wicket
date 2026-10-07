@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from nova.errors import ProviderError
 from nova.receipts import make_receipt
+from runtime.call_binding import describe_https
 from .http import post_json, post_json_lines
 
 
@@ -27,6 +28,22 @@ class OllamaProvider:
     def _ollama_url(self) -> str:
         return f"{self.base_url}/api/chat"
 
+    def https_call(self, governed_request: dict[str, Any]) -> dict[str, Any]:
+        payload = self._payload(governed_request, stream=False)
+        body = json.dumps(payload).encode("utf-8")
+        return describe_https(
+            "POST", self._ollama_url(), {"Content-Type": "application/json"}, body,
+        )
+
+    def completion_from_body(self, governed_request: dict[str, Any], body: bytes) -> dict[str, Any]:
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except ValueError as exc:
+            raise ProviderError(code="OLLAMA_REQUEST_FAILED", message="the provider did not return JSON") from exc
+        if not isinstance(data, dict):
+            raise ProviderError(code="OLLAMA_REQUEST_FAILED", message="the provider did not return an object")
+        return self._from_provider_json(governed_request, data)
+
     def chat_completion(self, governed_request: dict[str, Any]) -> dict[str, Any]:
         payload = self._payload(governed_request, stream=False)
         try:
@@ -35,6 +52,9 @@ class OllamaProvider:
             raise
         except Exception as exc:
             raise ProviderError(code="OLLAMA_REQUEST_FAILED", message=str(exc)) from exc
+        return self._from_provider_json(governed_request, data)
+
+    def _from_provider_json(self, governed_request: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         content = str((data.get("message") or {}).get("content") or "")
         completion = self._completion(content=content, completion_id=f"ollama-{uuid4()}")
         receipt = make_receipt(

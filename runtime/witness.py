@@ -25,7 +25,7 @@ from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
 from typing import Any, Callable
 
-from runtime.call_binding import BoundCall, UnknownCallShape, derive
+from runtime.call_binding import BoundCall, UnknownCallShape, derive, describe_https
 
 EXECUTION_VERSION = "infinity.witness.execution.v1"
 DIVERGENCE_VERSION = "infinity.witness.divergence.v1"
@@ -51,6 +51,49 @@ class WitnessOutcome:
     error: str | None = None
 
 
+def dispatch_local_tool(bound: BoundCall) -> bytes:
+    """Run a ``local_model_tool`` call. The witness owns this send; Nova does not."""
+    if bound.kind != "local_model_tool":
+        raise WitnessError("dispatch", "dispatch_local_tool only runs local_model_tool calls")
+    try:
+        arguments = json.loads(bound.arguments_json)
+    except ValueError as exc:
+        raise WitnessError("dispatch", "tool arguments are not JSON") from exc
+    if not isinstance(arguments, dict):
+        raise WitnessError("dispatch", "tool arguments must be an object")
+    prompt = arguments.get("prompt")
+    model = arguments.get("model")
+    if not isinstance(prompt, str) or not isinstance(model, str):
+        raise WitnessError("dispatch", "a local model call needs prompt and model text")
+    temperature = arguments.get("temperature", 0.2)
+    max_tokens = arguments.get("max_tokens", 2048)
+    ollama = os.environ.get("NOVA_NODE_OLLAMA_URL", "http://localhost:11434/api/generate")
+    payload = json.dumps({
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": temperature, "num_predict": max_tokens},
+    }).encode("utf-8")
+    try:
+        sent = describe_https("POST", ollama, {"Content-Type": "application/json"}, payload)
+        raw = dispatch_https(derive(sent))
+        data = json.loads(raw.decode("utf-8") or "{}")
+    except (OSError, ValueError, UnknownCallShape, WitnessError) as exc:
+        raise WitnessError("dispatch", str(exc)) from exc
+    if not isinstance(data, dict):
+        raise WitnessError("dispatch", "the local model did not return an object")
+    return str(data.get("response", "")).encode("utf-8")
+
+
+def dispatch_known(bound: BoundCall) -> bytes:
+    """Send a known shape. HTTPS goes out as bound; a local tool is run here."""
+    if bound.kind == "https_request":
+        return dispatch_https(bound)
+    if bound.kind == "local_model_tool":
+        return dispatch_local_tool(bound)
+    raise WitnessError("dispatch", "this witness cannot send that call shape")
+
+
 def dispatch_https(bound: BoundCall) -> bytes:
     """Send an ``https_request`` and return the response body. Redirects are not followed."""
     if bound.kind != "https_request":
@@ -68,11 +111,14 @@ def dispatch_https(bound: BoundCall) -> bytes:
     if parts.query:
         path = f"{path}?{parts.query}"
     try:
+        headers = dict(bound.headers)
+        # Not part of call_digest. Groq rejects the default Python agent; the digest does not cover it.
+        headers.setdefault("User-Agent", "infinity-core/0.1")
         connection.request(
             bound.method,
             path,
             body=bound.body if bound.body else None,
-            headers=dict(bound.headers),
+            headers=headers,
         )
         response = connection.getresponse()
         return response.read()

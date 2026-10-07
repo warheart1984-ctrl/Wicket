@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
 from nova.errors import ProviderError
+from nova.executor import WitnessReply, current_witness
 from nova.ick_approvals import DEFAULT_PENDING_TTL, ApprovalStore
+from runtime.call_binding import UnknownCallShape, bind_proposal, derive
 
 _HERE = Path(__file__).resolve()
 _EXE = "infinityctl.exe" if os.name == "nt" else "infinityctl"  # what `cargo build` produces
@@ -172,11 +174,20 @@ class IckGate:
             sign_key=(env.get("NOVA_ICK_SIGN_KEY") or "").strip() or None,
         )
 
-    def _run(self, proposal: dict[str, Any], approval_ids: list[str]) -> dict[str, Any]:
+    def _run(
+        self,
+        proposal: dict[str, Any],
+        approval_ids: list[str],
+        call: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Ask the kernel once. Any failure to get an answer is a refusal (fail closed)."""
         if self.service is not None:
-            return _call_service(self.service, {"op": "evaluate", "proposal": proposal,
-                                                "approval_ids": approval_ids})
+            request: dict[str, Any] = {
+                "op": "evaluate", "proposal": proposal, "approval_ids": approval_ids,
+            }
+            if call is not None:
+                request["call"] = call
+            return _call_service(self.service, request)
         try:
             binary = _find_binary(self.binary)
         except KernelRefusal:
@@ -266,6 +277,7 @@ class IckGate:
         effect: str = "read",
         risk: str = "low",
         source: str = "model-provider",
+        call: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         """Return {"verdict", "receipt_id"} if allowed; raise KernelRefusal otherwise.
 
@@ -275,13 +287,20 @@ class IckGate:
         The default describes a model call. Other actions pass their own `action`/`effect`.
         A verdict that needs a human is cleared only by a matching approval (see
         nova/ick_approvals.py); otherwise the request is parked as pending and refused.
+
+        ``call``, when set, is the concrete call. The signer derives effect, target, and
+        ``call_digest`` from it. Nova running the kernel itself binds the proposal before
+        evaluate; the signer service binds it on receipt of ``call``.
         """
         policy_id = self._policy_id()
         proposal = build_proposal(
             policy_id=policy_id, target=target, governed_request=governed_request,
             action=action, effect=effect, risk=risk, source=source,
         )
-        out = self._run(proposal, [])
+        service_call = call if self.service is not None else None
+        if call is not None and self.service is None:
+            proposal = bind_proposal(proposal, call)
+        out = self._run(proposal, [], service_call)
         verdict = str(out["decision"]["verdict"])
         receipt_id = str(out["receipt"]["receipt_id"])
         evidence = _evidence(proposal)
@@ -303,8 +322,11 @@ class IckGate:
             entry = self.approvals.claim(proposal_hash)
             if entry is not None:
                 # Same request again, now carrying the human's approval id.
-                approved = self._run({**proposal, "approval_id": entry["approval_id"]},
-                                     [entry["approval_id"]])
+                approved = self._run(
+                    {**proposal, "approval_id": entry["approval_id"]},
+                    [entry["approval_id"]],
+                    service_call,
+                )
                 if str(approved["decision"]["verdict"]) == "allow":
                     return {
                         "verdict": "allow",
@@ -319,6 +341,53 @@ class IckGate:
             receipt_id=receipt_id,
             proposal_hash=proposal_hash if verdict == "await_human_approval" else None,
         )
+
+    def run_witnessed(
+        self,
+        call: dict[str, Any],
+        *,
+        action: str,
+        source: str,
+        governed_request: dict[str, Any] | None = None,
+        risk: str = "low",
+    ) -> tuple[WitnessReply, dict[str, str]]:
+        """Evaluate ``call`` and let the witness send it. Does not call the target itself.
+
+        A missing witness, an unknown shape, or a refusal is a KernelRefusal. A dispatch
+        failure comes back as a reply with ``status == "failed"`` (the allow is consumed).
+        """
+        try:
+            derived = derive(call)
+            target, effect = derived.target, derived.effect
+        except UnknownCallShape:
+            target, effect = "unbound", "read"
+        ick = self.check(
+            target=target,
+            governed_request=governed_request,
+            action=action,
+            effect=effect,
+            risk=risk,
+            source=source,
+            call=call,
+        )
+        witness = current_witness()
+        if witness is None:
+            raise KernelRefusal(
+                code="WITNESS_UNAVAILABLE",
+                message="the gate is on and no witness is configured; the call was not sent",
+                receipt_id=ick.get("receipt_id"),
+            )
+        try:
+            reply = witness.execute(call, ick["receipt_id"])
+        except OSError as exc:
+            raise KernelRefusal(code="WITNESS_UNAVAILABLE", message=str(exc), receipt_id=ick.get("receipt_id")) from exc
+        if not reply.dispatched:
+            raise KernelRefusal(
+                code="WITNESS_" + (reply.divergence or "REFUSED").upper(),
+                message=f"witness: {reply.divergence or 'refused'}",
+                receipt_id=ick.get("receipt_id"),
+            )
+        return reply, ick
 
 
 def _evidence(proposal: dict[str, Any]) -> dict[str, str]:
@@ -422,7 +491,32 @@ class IckGatedProvider:
                 raise
             return None
 
+    def _known_call(self, governed_request: dict[str, Any]) -> dict[str, Any] | None:
+        builder = getattr(self._inner, "https_call", None)
+        if builder is None:
+            return None
+        return builder(governed_request)
+
+    def _from_witness(self, governed_request: dict[str, Any], call: dict[str, Any]) -> tuple[Any, dict[str, str]]:
+        reply, ick = self._gate.run_witnessed(
+            call, action="chat_completion", source="model-provider", governed_request=governed_request,
+        )
+        if reply.status == "failed":
+            self._finish(ick, status="failed", text=None, strict=False)
+            raise ProviderError(code="PROVIDER_REQUEST_FAILED", message=reply.error or "witness dispatch failed")
+        return reply, ick
+
     def chat_completion(self, governed_request: dict[str, Any]) -> dict[str, Any]:
+        call = self._known_call(governed_request)
+        if call is not None:
+            reply, ick = self._from_witness(governed_request, call)
+            try:
+                result = self._inner.completion_from_body(governed_request, reply.body or b"")
+            except BaseException:
+                self._finish(ick, status="failed", text=None, strict=False)
+                raise
+            outcome = self._finish(ick, status="completed", text=reply_text(result), strict=True)
+            return {**result, "ick": {**ick, **({"outcome_receipt_id": outcome} if outcome else {})}}
         ick = self._gate.check(target=self._target(), governed_request=governed_request)
         try:
             result = self._inner.chat_completion(governed_request)
@@ -434,6 +528,20 @@ class IckGatedProvider:
 
     async def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
         request = {"messages": [{"content": getattr(m, "content", None) or m.get("content", "")} for m in messages]}
+        if kwargs.get("max_tokens") is not None:
+            request["max_tokens"] = kwargs["max_tokens"]
+        if kwargs.get("temperature") is not None:
+            request["temperature"] = kwargs["temperature"]
+        call = self._known_call(request)
+        if call is not None:
+            reply, ick = self._from_witness(request, call)
+            try:
+                response = self._inner.response_from_body(reply.body or b"")
+            except BaseException:
+                self._finish(ick, status="failed", text=None, strict=False)
+                raise
+            self._finish(ick, status="completed", text=str(getattr(response, "content", "") or ""), strict=True)
+            return response
         ick = self._gate.check(target=self._target(), governed_request=request)
         try:
             response = await self._inner.invoke(messages, **kwargs)
@@ -447,6 +555,11 @@ class IckGatedProvider:
         attr = getattr(self._inner, name)  # AttributeError if the inner provider lacks it
         if name == "chat_completion_stream":
             def gated(governed_request: dict[str, Any]) -> Iterator[dict[str, Any]]:
+                if getattr(self._inner, "https_call", None) is not None:
+                    raise KernelRefusal(
+                        code="STREAM_NOT_BOUND",
+                        message="a streamed provider call is not sent; the witness binds one request body",
+                    )
                 ick = self._gate.check(target=self._target(), governed_request=governed_request)
                 parts: list[str] = []
                 finished = False
@@ -472,6 +585,7 @@ def gate_action(
     source: str,
     governed_request: dict[str, Any] | None = None,
     risk: str = "low",
+    call: dict[str, Any] | None = None,
 ) -> dict[str, str] | None:
     """Ask the kernel about one action. Returns None when the gate is off; raises KernelRefusal.
 
@@ -481,7 +595,7 @@ def gate_action(
         return None
     return gate.check(
         target=target, governed_request=governed_request, action=action, effect=effect, risk=risk,
-        source=source,
+        source=source, call=call,
     )
 
 

@@ -25,7 +25,7 @@ def replay_coding(trace_id: str) -> dict[str, Any]:
         "current_code": receipt.get("current_code") or "",
     }
     governance = GovernanceRuntime().enforce_invariants(task)
-    updated_code = generate(_coding_prompt(task), model="qwen2.5-coder:3b", temperature=0.15)
+    updated_code = generate(_coding_prompt(task), tool="code", model="qwen2.5-coder:3b", temperature=0.15)
     original_preview = str(receipt.get("updated_code_preview") or "")
     deterministic = updated_code.strip().startswith(original_preview.strip())
     diff_lines = difflib.unified_diff(
