@@ -25,12 +25,17 @@ What this does NOT do
   * Without a ``call`` on the request, it cannot tell whether Nova describes its action
     truthfully. A taken-over Nova can still ask "may I do a harmless read?" and then do
     something else. The log proves what was asked and what the policy said, not what was done.
-  * With a ``call``, this process derives ``effect`` and ``target`` from a known call shape,
-    computes ``call_digest`` itself, and denies a disagreement or an unknown shape. It still
-    does not perform the call. Executor mode is ``runtime/witness.py``: a different key and a
-    different log. When Nova's gate is on, known shapes are sent by that witness or not sent.
+  * With a ``call``, this process verifies ``Authorization: Wicket <token>``, derives
+    ``effect`` and ``target`` from a known call shape, computes ``call_digest`` with the
+    caller id from the key file, and sets risk and action from that caller's grant. A bad
+    token is ``IDENTITY_UNVERIFIED``. No grant, or a stated risk or action that differs, is
+    ``AUTHORITY_DENIED``. It still does not perform the call. Executor mode is
+    ``runtime/witness.py``: a different key and a different log. When Nova's gate is on,
+    known shapes are sent by that witness or not sent.
   * ``infinityctl evaluate`` on its own still trusts the caller's effect, target, and
-    ``call_digest``. Derivation happens here, only when ``call`` is present.
+    ``call_digest``, and it does not verify caller tokens. The witness does, so a receipt
+    minted there is not executed without a matching credential. Derivation happens here,
+    only when ``call`` is present.
   * An outcome ("completed", "failed", the hashes) is Nova's claim, now signed and chained.
   * It does not stop Nova from stopping to ask at all (see the anchor and its publication).
 
@@ -58,7 +63,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from runtime.call_binding import BindingError, bind_proposal
+from runtime.call_binding import BindingError
+from runtime.caller_auth import prepare_bound_proposal
 from runtime.kernel import Kernel, KernelError, find_binary
 
 MAX_REQUEST = 1 << 20  # 1 MiB; a proposal is a few hundred bytes plus the request digest
@@ -88,9 +94,16 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 class Service:
-    def __init__(self, kernel: Kernel, *, approvals: Path | None = None) -> None:
+    def __init__(
+        self,
+        kernel: Kernel,
+        *,
+        approvals: Path | None = None,
+        caller_keys: Path | None = None,
+    ) -> None:
         self.kernel = kernel
         self.approvals = approvals
+        self.caller_keys = Path(caller_keys) if caller_keys is not None else None
         try:
             self.policy_id = str(json.loads(kernel.policy.read_text())["policy_id"])
         except Exception as exc:
@@ -148,9 +161,22 @@ class Service:
                     or len(ids) > 8:
                 raise ServiceError("approval_ids must be a short list of strings")
             if "call" in request:
+                authorization = request.get("authorization")
+                if authorization is not None and not isinstance(authorization, str):
+                    raise ServiceError("authorization must be text")
                 try:
-                    proposal = bind_proposal(proposal, request.get("call"))
-                except BindingError as exc:
+                    keys_text = ""
+                    if self.caller_keys is not None:
+                        keys_text = self.caller_keys.read_text(encoding="utf-8")
+                    proposal = prepare_bound_proposal(
+                        proposal,
+                        request.get("call"),
+                        authorization,
+                        self.kernel.policy.read_text(encoding="utf-8"),
+                        keys_text,
+                        now,
+                    )
+                except (BindingError, OSError) as exc:
                     raise ServiceError(str(exc)) from exc
             with self._lock:
                 self._check_approvals(ids, proposal, now)
@@ -270,6 +296,10 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--log", required=True)
     serve.add_argument("--anchor")
     serve.add_argument("--sign-key", required=True)
+    serve.add_argument(
+        "--caller-keys",
+        help="caller public keys (caller id for each Ed25519 key). Bound calls need this.",
+    )
     serve.add_argument("--approvals", help="the human-written approvals file (read only)")
     serve.add_argument("--binary")
     serve.add_argument("--socket-mode", default="660", help="octal file mode of the socket (default 660)")
@@ -284,7 +314,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         kernel = Kernel(Path(args.policy), Path(args.log), binary=args.binary or find_binary(),
                         anchor=Path(args.anchor) if args.anchor else None, sign_key=Path(args.sign_key))
-        service = Service(kernel, approvals=Path(args.approvals) if args.approvals else None)
+        service = Service(
+            kernel,
+            approvals=Path(args.approvals) if args.approvals else None,
+            caller_keys=Path(args.caller_keys) if args.caller_keys else None,
+        )
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
         server = make_server(service, args.socket, mode=mode, allow_uids=frozenset(args.allow_uid))
     except (KernelError, OSError) as exc:

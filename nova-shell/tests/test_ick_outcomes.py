@@ -147,7 +147,9 @@ def test_the_async_path_records_an_outcome_too(paths):
 
 
 def test_the_local_model_tool_records_an_outcome(monkeypatch, paths):
-    monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))
+    policy = paths["dir"] / "demo.json"
+    policy.write_text(DEMO_POLICY.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
     monkeypatch.setenv("NOVA_ICK_LOG", str(paths["log"]))
     monkeypatch.setenv("NOVA_ICK_ANCHOR", str(paths["anchor"]))
     monkeypatch.setattr(local_model, "_ollama_generate", lambda *a, **k: "generated code")
@@ -191,7 +193,7 @@ def test_gossip_records_whether_each_send_worked(monkeypatch, paths):
     monkeypatch.setattr(federation, "load_peers", lambda: [{"peer_id": "a", "endpoint": "http://up.test"},
                                                           {"peer_id": "b", "endpoint": "http://down.test"}])
     monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
-    with executor_setup.install_witness(monkeypatch, paths["dir"], dispatch):
+    with executor_setup.install_witness(monkeypatch, paths["dir"], dispatch, action="gossip_to_peer"):
         results = federation.gossip_to_peers()
     assert [r["status"] for r in results] == ["sent", "error"]
     assert [e["status"] for e in entries(paths) if "status" in e] == ["completed", "failed"]

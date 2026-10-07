@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -19,10 +20,19 @@ import ickverify  # noqa: E402
 
 import pytest
 
-from runtime.call_binding import bind_proposal, derive
+from runtime.call_binding import bind_proposal
+from runtime.call_binding import derive as derive_call
+from runtime.caller_token import mint_for_call
 from runtime.ick_service import Service, ServiceError
 from runtime.kernel import Kernel, KernelError, find_binary
 from runtime.witness import Witness, dispatch_https
+
+CALLER = "alice"
+OTHER = "bob"
+
+
+def derive(call, caller_id=CALLER):
+    return derive_call(call, caller_id)
 
 try:
     BINARY = find_binary()
@@ -78,11 +88,30 @@ def keygen(directory, name):
     return private, public
 
 
+def _grant(caller_id):
+    return {
+        "effects": ["read", "write"],
+        "target_prefixes": ["http://", "https://", "local-model-tool:"],
+        "risk": "low",
+        "action": "call",
+    }
+
+
 class World:
     def __init__(self, tmp_path):
         self.dir = tmp_path
         self.signer_key, self.signer_pub = keygen(tmp_path, "signer")
         self.witness_key, self.witness_pub = keygen(tmp_path, "witness")
+        self.alice_key, self.alice_pub = keygen(tmp_path, "alice")
+        self.bob_key, self.bob_pub = keygen(tmp_path, "bob")
+        self.caller_keys = tmp_path / "caller-keys.json"
+        self.caller_keys.write_text(json.dumps({
+            "version": "wicket.caller-keys.v1",
+            "keys": [
+                {"caller_id": CALLER, "public_key": self.alice_pub.read_text(encoding="utf-8").strip()},
+                {"caller_id": OTHER, "public_key": self.bob_pub.read_text(encoding="utf-8").strip()},
+            ],
+        }))
         policy = tmp_path / "policy.json"
         policy.write_text(json.dumps({
             "version": "infinity.policy.v1",
@@ -90,24 +119,49 @@ class World:
             "denied_effects": [],
             "effects_requiring_approval": [],
             "risks_requiring_approval": [],
+            "callers": {CALLER: _grant(CALLER), OTHER: _grant(OTHER)},
         }))
         self.policy = policy
         self.log = tmp_path / "receipts.jsonl"
         self.anchor = tmp_path / "anchor.jsonl"
         self.witness_log = tmp_path / "witness.jsonl"
         kernel = Kernel(policy, self.log, binary=BINARY, anchor=self.anchor, sign_key=self.signer_key)
-        self.service = Service(kernel)
+        self.service = Service(kernel, caller_keys=self.caller_keys)
         self.seen = []
 
-    def allow(self, call, effect=None, target=None, call_digest=None):
-        derived = derive(call)
+    def authorization(self, call, *, who=CALLER, claimed=None, exp=None, jti=None, call_digest=None):
+        private = self.alice_key if who == CALLER else self.bob_key
+        return mint_for_call(
+            private.read_text(encoding="utf-8"),
+            self.caller_keys.read_text(encoding="utf-8"),
+            call,
+            now=time.time(),
+            claimed_caller_id=claimed,
+            exp=exp,
+            jti=jti,
+            call_digest=call_digest,
+        )
+
+    def allow(self, call, effect=None, target=None, call_digest=None, who=CALLER):
+        caller_id = CALLER if who == CALLER else OTHER
+        derived = derive(call, caller_id)
         body = proposal(
             derived.effect if effect is None else effect,
             derived.target if target is None else target,
         )
         if call_digest is not None:
             body["call_digest"] = call_digest
-        return self.service.handle({"op": "evaluate", "proposal": body, "call": call})
+        return self.service.handle({
+            "op": "evaluate",
+            "proposal": body,
+            "call": call,
+            "authorization": self.authorization(call, who=who),
+        })
+
+    def run(self, witness, call, receipt_id, authorization=None, **token):
+        if authorization is None:
+            authorization = self.authorization(call, **token)
+        return witness.execute(call, receipt_id, authorization=authorization)
 
     def witness(self, dispatch=None, clock=None, allow_ttl=3600):
         if dispatch is None:
@@ -127,6 +181,8 @@ class World:
             dispatch=dispatch,
             allow_ttl=allow_ttl,
             clock=clock,
+            caller_keys=self.caller_keys,
+            policy=self.policy,
         )
 
 
@@ -166,11 +222,11 @@ def test_allow_a_read_then_execute_a_write_is_a_mismatch_and_the_read_still_runs
     receipt = allowed["receipt"]
     assert receipt["call_digest"] == derive(get_call).call_digest
     witness = world.witness()
-    mismatch = witness.execute(post_call, receipt["receipt_id"])
+    mismatch = world.run(witness, post_call, receipt["receipt_id"])
     assert mismatch.dispatched is False and mismatch.divergence == "mismatch"
     assert world.seen == []
     assert mismatch.entries[0]["key_id"] != receipt["key_id"]
-    done = witness.execute(get_call, receipt["receipt_id"])
+    done = world.run(witness, get_call, receipt["receipt_id"])
     assert done.dispatched is True and done.status == "completed" and done.body == b"ok"
     assert world.seen == ["GET"]
     checked = subprocess.run(
@@ -204,8 +260,8 @@ def test_one_allow_cannot_be_replayed(tmp_path):
     call = https_call("GET", "example.test", 443, "/once")
     receipt = world.allow(call)["receipt"]
     witness = world.witness()
-    first = witness.execute(call, receipt["receipt_id"])
-    second = witness.execute(call, receipt["receipt_id"])
+    first = world.run(witness, call, receipt["receipt_id"])
+    second = world.run(witness, call, receipt["receipt_id"])
     assert first.status == "completed" and first.dispatched is True
     assert second.divergence == "reused" and second.dispatched is False
     assert world.seen == ["GET"]
@@ -218,16 +274,19 @@ def test_describing_a_write_as_a_read_is_denied_and_that_receipt_cannot_dispatch
     derived = derive(post)
     stated = proposal("read", "http://example.test:443/harmless")
     stated["call_digest"] = derived.call_digest
-    out = world.service.handle({"op": "evaluate", "proposal": stated, "call": post})
+    out = world.service.handle({
+        "op": "evaluate", "proposal": stated, "call": post,
+        "authorization": world.authorization(post),
+    })
     assert out["decision"]["verdict"] == "deny"
     assert out["decision"]["reason_codes"] == ["DESCRIPTION_DISAGREEMENT"]
-    bound = bind_proposal(stated, post)
+    bound = bind_proposal(stated, post, CALLER)
     assert bound["effect"] == "write" and bound["target"] == derived.target
     assert bound["payload"]["binding_fault"] == "DESCRIPTION_DISAGREEMENT"
     assert world.service.kernel.proposal_hash(bound) == out["decision"]["proposal_hash"]
     assert world.service.kernel.proposal_hash(stated) != out["decision"]["proposal_hash"]
     witness = world.witness()
-    refused = witness.execute(post, out["receipt"]["receipt_id"])
+    refused = world.run(witness, post, out["receipt"]["receipt_id"])
     assert refused.divergence == "unauthorized" and refused.dispatched is False
     assert world.seen == []
 
@@ -246,21 +305,26 @@ def test_a_matching_description_with_the_wrong_digest_is_denied(tmp_path):
 @pytest.mark.skipif(BINARY is None, reason="infinityctl not built (run `cargo build`)")
 def test_an_unknown_call_shape_is_denied_and_not_allowed(tmp_path):
     world = World(tmp_path)
+    shell = {"shape": "shell", "cmd": "id"}
     out = world.service.handle({
         "op": "evaluate",
         "proposal": proposal("read", "t"),
-        "call": {"shape": "shell", "cmd": "id"},
+        "call": shell,
+        "authorization": world.authorization(shell),
     })
     assert out["decision"]["verdict"] == "deny"
     assert out["decision"]["reason_codes"] == ["UNKNOWN_CALL_SHAPE"]
     assert "call_digest" not in out["receipt"]
     options = https_call("GET", "example.test", 443, "/a")
     options["method"] = "OPTIONS"
-    denied = world.service.handle({"op": "evaluate", "proposal": proposal("read", "t"), "call": options})
+    denied = world.service.handle({
+        "op": "evaluate", "proposal": proposal("read", "t"), "call": options,
+        "authorization": world.authorization(options),
+    })
     assert denied["decision"]["reason_codes"] == ["UNKNOWN_CALL_SHAPE"]
     allowed = world.allow(https_call("GET", "example.test", 443, "/known"))
     witness = world.witness()
-    unknown_at_execute = witness.execute({"shape": "shell", "cmd": "id"}, allowed["receipt"]["receipt_id"])
+    unknown_at_execute = world.run(witness, {"shape": "shell", "cmd": "id"}, allowed["receipt"]["receipt_id"])
     assert unknown_at_execute.divergence == "mismatch" and unknown_at_execute.dispatched is False
     assert world.seen == []
 
@@ -273,6 +337,7 @@ def test_a_local_model_tool_write_described_as_a_read_is_denied(tmp_path):
         "op": "evaluate",
         "proposal": proposal("read", "local-model-tool:explain"),
         "call": call,
+        "authorization": world.authorization(call),
     })
     assert out["decision"]["verdict"] == "deny"
     assert out["decision"]["reason_codes"] == ["DESCRIPTION_DISAGREEMENT"]
@@ -282,6 +347,10 @@ def test_a_local_model_tool_write_described_as_a_read_is_denied(tmp_path):
 @pytest.mark.skipif(BINARY is None, reason="infinityctl not built (run `cargo build`)")
 def test_without_a_call_the_signer_still_trusts_the_description(tmp_path):
     world = World(tmp_path)
+    # No callers map: a request with no concrete call is still the caller's claim.
+    policy = json.loads(world.policy.read_text(encoding="utf-8"))
+    policy.pop("callers")
+    world.policy.write_text(json.dumps(policy), encoding="utf-8")
     out = world.service.handle({"op": "evaluate", "proposal": proposal("write", "anywhere")})
     assert out["decision"]["verdict"] == "allow"
     assert "call_digest" not in out["receipt"]
@@ -301,14 +370,14 @@ def test_an_expired_allow_is_late_and_a_broken_log_is_unauthorized(tmp_path):
     call = https_call("GET", "example.test", 443, "/late")
     receipt = world.allow(call)["receipt"]
     issued = _issued(receipt["issued_at"])
-    late = world.witness(clock=lambda: issued + 3601).execute(call, receipt["receipt_id"])
+    late = world.run(world.witness(clock=lambda: issued + 3601), call, receipt["receipt_id"])
     assert late.divergence == "late" and late.dispatched is False
     assert world.seen == []
     text = world.log.read_text(encoding="utf-8")
     flipped = text.replace("sha3-256:", "sha3-255:", 1)
     assert flipped != text
     world.log.write_text(flipped)
-    refused = world.witness(clock=lambda: issued + 10).execute(call, receipt["receipt_id"])
+    refused = world.run(world.witness(clock=lambda: issued + 10), call, receipt["receipt_id"])
     assert refused.divergence == "unauthorized" and refused.dispatched is False
     assert world.seen == []
 
@@ -324,10 +393,10 @@ def test_a_dispatch_failure_consumes_the_allow(tmp_path):
         raise RuntimeError("target down")
 
     witness = world.witness(dispatch=boom)
-    failed = witness.execute(call, receipt["receipt_id"])
+    failed = world.run(witness, call, receipt["receipt_id"])
     assert failed.dispatched is True and failed.status == "failed"
     assert failed.entries[0]["status"] == "started"
-    again = witness.execute(call, receipt["receipt_id"])
+    again = world.run(witness, call, receipt["receipt_id"])
     assert again.divergence == "reused" and again.dispatched is False
 
 
@@ -362,8 +431,8 @@ def test_a_real_localhost_get_is_sent_and_a_mismatched_post_is_not(tmp_path):
         post_call = https_call("POST", "127.0.0.1", port, "/ping", body="no")
         receipt = world.allow(get_call)["receipt"]
         witness = world.witness(dispatch=dispatch_https)
-        bad = witness.execute(post_call, receipt["receipt_id"])
-        good = witness.execute(get_call, receipt["receipt_id"])
+        bad = world.run(witness, post_call, receipt["receipt_id"])
+        good = world.run(witness, get_call, receipt["receipt_id"])
         assert bad.divergence == "mismatch" and bad.dispatched is False
         assert good.status == "completed" and good.body == b"pong"
         assert seen == [("GET", "/ping")]
@@ -411,14 +480,15 @@ def test_ickverify_recomputes_the_same_call_digest():
     tool = {"shape": "local_model_tool", "tool": "explain", "arguments": {"b": 1, "a": 2}}
     again = {"shape": "local_model_tool", "tool": "explain", "arguments": {"a": 2, "b": 1}}
     for call in (plain, same, with_secret, other_secret, tool, again):
-        assert ickverify.call_digest(call) == derive(call).call_digest
-    assert ickverify.call_digest(plain) == ickverify.call_digest(same)
-    assert ickverify.call_digest(with_secret) == ickverify.call_digest(other_secret)
-    assert ickverify.call_digest(with_secret) != ickverify.call_digest(plain)
-    assert ickverify.call_digest(tool) == ickverify.call_digest(again)
+        assert ickverify.call_digest(call, CALLER) == derive(call).call_digest
+    assert ickverify.call_digest(plain, CALLER) == ickverify.call_digest(same, CALLER)
+    assert ickverify.call_digest(with_secret, CALLER) == ickverify.call_digest(other_secret, CALLER)
+    assert ickverify.call_digest(with_secret, CALLER) != ickverify.call_digest(plain, CALLER)
+    assert ickverify.call_digest(tool, CALLER) == ickverify.call_digest(again, CALLER)
+    assert derive(plain, CALLER).call_digest != derive(plain, OTHER).call_digest
 
 
-def _allow_receipt(tmp_path, *, digest):
+def _allow_receipt(tmp_path, *, digest, caller_id=CALLER):
     policy = tmp_path / "policy.json"
     policy.write_text(json.dumps({
         "version": "infinity.policy.v1", "policy_id": "policy-test-v1",
@@ -426,6 +496,8 @@ def _allow_receipt(tmp_path, *, digest):
     }))
     log = tmp_path / "receipts.jsonl"
     body = proposal("read", "stated-target")
+    if caller_id is not None:
+        body["caller_id"] = caller_id
     if digest is not None:
         body["call_digest"] = digest
     Kernel(policy, log, binary=BINARY).evaluate(body)
@@ -487,18 +559,20 @@ def test_witness_join_reports_mismatch_unauthorized_reused_late_and_missing(tmp_
     assert any("missing execution" in error for error in report["errors"])
 
     witness = world.witness()
-    mismatch = witness.execute(https_call("POST", "example.test", 80, "/join", body="no"), receipt_id)
+    mismatch = world.run(witness, https_call("POST", "example.test", 80, "/join", body="no"), receipt_id)
     assert mismatch.divergence == "mismatch"
     code, report = _verify_join(world.log, world.witness_log, world.witness_pub, call, receipt_id)
     assert code == 1
     assert any(error.startswith("mismatch:") for error in report["errors"])
 
+    shell = {"shape": "shell", "cmd": "id"}
     denied = world.service.handle({
         "op": "evaluate",
         "proposal": proposal("read", "nope"),
-        "call": {"shape": "shell", "cmd": "id"},
+        "call": shell,
+        "authorization": world.authorization(shell),
     })
-    unauthorized = witness.execute(call, denied["receipt"]["receipt_id"])
+    unauthorized = world.run(witness, call, denied["receipt"]["receipt_id"])
     assert unauthorized.divergence == "unauthorized"
     code, report = _verify_join(world.log, world.witness_log, world.witness_pub)
     assert any(error.startswith("unauthorized:") for error in report["errors"])
@@ -508,8 +582,8 @@ def test_witness_join_reports_mismatch_unauthorized_reused_late_and_missing(tmp_
     replay_call = https_call("GET", "example.test", 80, "/replay")
     replay_id = fresh.allow(replay_call)["receipt"]["receipt_id"]
     replay = fresh.witness()
-    assert replay.execute(replay_call, replay_id).status == "completed"
-    assert replay.execute(replay_call, replay_id).divergence == "reused"
+    assert fresh.run(replay, replay_call, replay_id).status == "completed"
+    assert fresh.run(replay, replay_call, replay_id).divergence == "reused"
     code, report = _verify_join(fresh.log, fresh.witness_log, fresh.witness_pub, replay_call, replay_id)
     assert any(error.startswith("reused:") for error in report["errors"])
     assert not any("missing execution" in error for error in report["errors"])
@@ -519,7 +593,9 @@ def test_witness_join_reports_mismatch_unauthorized_reused_late_and_missing(tmp_
     late_call = https_call("GET", "example.test", 80, "/late")
     late_receipt = late_world.allow(late_call)["receipt"]
     issued = _issued(late_receipt["issued_at"])
-    assert late_world.witness(clock=lambda: issued + 3601).execute(late_call, late_receipt["receipt_id"]).divergence == "late"
+    assert late_world.run(
+        late_world.witness(clock=lambda: issued + 3601), late_call, late_receipt["receipt_id"],
+    ).divergence == "late"
     code, report = _verify_join(late_world.log, late_world.witness_log, late_world.witness_pub)
     assert any(error.startswith("late:") for error in report["errors"])
 
@@ -527,7 +603,7 @@ def test_witness_join_reports_mismatch_unauthorized_reused_late_and_missing(tmp_
     good = World(tmp_path / "good")
     good_call = https_call("GET", "example.test", 80, "/good")
     good_id = good.allow(good_call)["receipt"]["receipt_id"]
-    assert good.witness().execute(good_call, good_id).status == "completed"
+    assert good.run(good.witness(), good_call, good_id).status == "completed"
     code, report = _verify_join(good.log, good.witness_log, good.witness_pub, good_call, good_id)
     assert code == 0 and report["ok"] is True, report
 

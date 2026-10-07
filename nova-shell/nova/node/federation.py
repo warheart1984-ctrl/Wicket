@@ -12,7 +12,7 @@ from nova.ick import IckGate, KernelRefusal, OutcomeNotRecorded, gate_outcome
 from nova.node.identity import NodeIdentity, sign_payload, verify_payload_signature
 from nova.node.ledger import append_ledger, runtime_dir
 from nova.node.policy import load_node_policy
-from runtime.call_binding import UnknownCallShape, derive, describe_https
+from runtime.call_binding import UnknownCallShape, describe_https, ensure_known_shape
 
 router = APIRouter()
 
@@ -69,7 +69,7 @@ def gossip_to_peers() -> list[dict[str, Any]]:
             "POST", f"{endpoint}/node/gossip", {"Content-Type": "application/json"}, body,
         )
         try:
-            derive(call)
+            ensure_known_shape(call)
         except UnknownCallShape:
             _record_unknown_gossip(gate, call)
             results.append({"peer_id": peer_id, "status": "refused", "error": "UNKNOWN_CALL_SHAPE"})

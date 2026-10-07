@@ -67,7 +67,7 @@ class _RecordingWitness(WitnessEndpoint):
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def execute(self, call: dict, allow_receipt_id: str) -> WitnessReply:
+    def execute(self, call: dict, allow_receipt_id: str, authorization: str | None = None) -> WitnessReply:
         self.calls.append(call)
         return WitnessReply(dispatched=True, divergence=None, status="completed", body=b"{}", error=None)
 

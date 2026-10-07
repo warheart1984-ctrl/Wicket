@@ -42,7 +42,7 @@
           "minLength": 1
         }
       },
-      "description": "Who is asking, as the caller says. It is recorded and hashed, so it cannot be changed afterwards without breaking the log, but the kernel never reads it and no policy rule can use it. It is not authenticated: it is as trustworthy as the process that wrote it. Do not read it as proof of who acted."
+      "description": "Who is asking, as the caller says. It is recorded and hashed, so it cannot be changed afterwards without breaking the log, but the kernel never reads it and no policy rule can use it. It is not authenticated: it is as trustworthy as the process that wrote it. Do not read it as proof of who acted. A bound call's caller_id is the separate field the signer fills from the caller key file."
     },
     "action": {
       "type": "string",
@@ -93,7 +93,12 @@
     "call_digest": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "description": "SHA-256 of a concrete call, sha256:<64 lowercase hex>. Optional. The kernel hashes it and does not interpret it. The signer fills it when the request includes a call; a proposal that only states it is the caller's claim."
+      "description": "SHA-256 of a concrete call, sha256:<64 lowercase hex>. Optional. The kernel hashes it and does not interpret it. The signer fills it when the request includes a call; a proposal that only states it is the caller's claim. The digest includes the verified caller id."
+    },
+    "caller_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Caller id from the caller key file, not the actor field and not the caller id string inside a token. Optional. The kernel hashes it. When the policy has a callers grant, the kernel requires this id to be listed. infinityctl evaluate does not verify a token for it."
     }
   }
 }

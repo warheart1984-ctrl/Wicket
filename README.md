@@ -87,17 +87,23 @@ The typed contracts are `contracts/receipt.v2.json` and `contracts/outcome.v1.js
 
 ### What a policy can and cannot say
 
-- **A policy only restricts.** It has three lists: `denied_effects` (always refused), `effects_requiring_approval`
-  and `risks_requiring_approval` (wait for a human). It cannot allow anything; there is no allow-list.
+- **The three lists only restrict.** A policy has `denied_effects` (always refused), `effects_requiring_approval`
+  and `risks_requiring_approval` (wait for a human). Those lists cannot allow anything.
+- **`callers` is a per-caller grant, and only when it is present.** Each listed caller id gets effects, target
+  prefixes, and one risk and one action. The kernel denies anyone who is not listed (`AUTHORITY_DENIED`).
+  When `callers` is absent, that check is skipped and the old behavior remains. The signer and the witness
+  still require a verified caller and a grant on a bound call: no grant means `AUTHORITY_DENIED` and nothing
+  is sent. `infinityctl evaluate` does not verify caller tokens.
 - **The kernel decides some things before it reads the policy.** `deploy`, `authority_change` and
   `audit_delete` are always denied (`FORBIDDEN_EFFECT`). An unknown effect or risk is denied. So the only effects
-  that can ever be allowed are `read` and `write`, and a policy with every list empty is the least restrictive one
-  there is, not "wide open". There is no way to switch `deploy` on short of changing the kernel.
+  that can ever be allowed are `read` and `write`, and a policy with every list empty and no `callers` map is
+  the least restrictive one there is, not "wide open". There is no way to switch `deploy` on short of changing
+  the kernel.
 - **`actor` is recorded, not enforced.** It is hashed into the proposal (so it cannot be altered afterwards) but the
   kernel never reads it, no rule can mention it, and it is not authenticated. Nova names which of its paths is
   asking (`nova-shell/model-provider`, `nova-shell/local-model-tool`, `nova-shell/gossip`), so the log can tell
-  them apart, but that is Nova's own claim. `target` and `effect` are likewise whatever the caller says (see
-  `THREAT_MODEL.md`).
+  them apart, but that is Nova's own claim. A bound call's `caller_id` is separate: it comes from the caller
+  key file after the token verifies. Whoever can write that key file can add callers (see `THREAT_MODEL.md`).
   Upgrading changes the hash of every request, so an approval given before the upgrade no longer matches and
   the request must be approved again.
 - Tests pin all of this (`tests/test_policy_semantics.py`), so a change to it cannot happen quietly.
@@ -425,7 +431,9 @@ python -m nova.api
 Groq (`https://api.groq.com/openai/v1`, `openai/gpt-oss-120b`) works the same way. Both
 were checked live before this default. One change was made to the imported code: a `User-Agent`
 header, because Groq rejects Python's default one. `User-Agent` is sent and is not part of
-`call_digest`.
+`call_digest`. It names the HTTP library, not the caller. Hashing it would split one call into
+many digests when that library string changes, and it would not authenticate anyone. The
+verified caller id is the identity field.
 
 ### Nova sends model HTTP only with a policy and a witness
 
@@ -443,8 +451,12 @@ apply to gossip, and it does not bypass a policy that is already set. Do not set
 deploy unit or a production environment.
 
 When the policy and the witness are both configured, Nova asks the kernel and the witness
-sends a known-shape call. Effect, target, and `call_digest` come from that call. Gossip does
-not send unless that gate produces a matching allow and a witness performs the call.
+sends a known-shape call. The caller presents `Authorization: Wicket <token>`. Effect, target,
+and `call_digest` come from that call and from the caller id in the caller key file. The
+policy grant sets risk and action for that caller. Gossip does not send unless that gate
+produces a matching allow and a witness performs the call. `WICKET_CALLER_KEY` is the caller's
+private key. `WICKET_CALLER_KEYS` is the public map the signer and the witness trust. Whoever
+can write that map can add callers. Direct `infinityctl evaluate` does not verify tokens.
 Optional with `NOVA_ICK_POLICY`: `NOVA_ICK_BIN`, `NOVA_ICK_LOG` (chained receipt log) and
 `NOVA_ICK_ANCHOR` (needs the log). To keep the key and log away from Nova entirely, set
 `NOVA_ICK_SERVICE` instead (see the signer service). Nova still does not hold the witness key.

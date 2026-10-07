@@ -258,14 +258,15 @@ def test_gossip_can_be_approved_like_any_other_action(tmp_path, monkeypatch):
 
     monkeypatch.setattr(federation, "load_peers", lambda: [{"peer_id": "p1", "endpoint": "http://peer.test"}])
     monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
-    demo = HERE.parent / "demo" / "policy.json"  # writes need approval
+    demo = tmp_path / "demo.json"  # writes need approval; a copy so the test can grant a caller
+    demo.write_text((HERE.parent / "demo" / "policy.json").read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setenv("NOVA_ICK_POLICY", str(demo))
     monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
     store = ApprovalStore(tmp_path / "human" / "approvals.jsonl", tmp_path / "state")
     monkeypatch.setenv("NOVA_ICK_APPROVALS", str(store.approvals_file))
     monkeypatch.setenv("NOVA_ICK_STATE", str(tmp_path / "state"))
 
-    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch, action="gossip_to_peer"):
         assert federation.gossip_to_peers()[0]["status"] == "refused" and sent == []
         store.approve(store.pending()[0]["proposal_hash"], approved_by="alice")
         assert federation.gossip_to_peers()[0]["status"] == "sent" and sent == ["http://peer.test:80/node/gossip"]

@@ -92,6 +92,8 @@ def _open_policy(path: Path) -> None:
 def test_api_chat_does_not_reach_the_provider_without_a_witness(client, model, monkeypatch, tmp_path):
     policy = tmp_path / "open.json"
     _open_policy(policy)
+    executor_setup.arm_caller(monkeypatch, tmp_path)
+    executor_setup.grant_caller(policy, "chat_completion")
     monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
     monkeypatch.setenv("NOVA_ICK_LOG", str(tmp_path / "receipts.jsonl"))
     response = client.post("/v1/chat", json={"prompt": "What is the capital of France?"})
@@ -103,6 +105,8 @@ def test_api_chat_does_not_reach_the_provider_without_a_witness(client, model, m
 def test_the_direct_call_opt_out_does_not_bypass_a_configured_policy(client, model, monkeypatch, tmp_path, capsys):
     policy = tmp_path / "open.json"
     _open_policy(policy)
+    executor_setup.arm_caller(monkeypatch, tmp_path)
+    executor_setup.grant_caller(policy, "chat_completion")
     monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
     monkeypatch.setenv("NOVA_ICK_LOG", str(tmp_path / "receipts.jsonl"))
     monkeypatch.setenv("WICKET_ALLOW_DIRECT_CALLS", "1")
@@ -130,7 +134,7 @@ def test_a_configured_gate_keeps_the_derived_call_digest(client, model, monkeypa
 
     def dispatch(bound):
         call = describe_https(bound.method, bound.url, dict(bound.headers), bound.body)
-        derived = derive(call)
+        derived = derive(call, bound.caller_id)
         assert bound.call_digest == derived.call_digest
         assert bound.effect == derived.effect == "write"
         assert bound.target == derived.target
@@ -179,6 +183,8 @@ def test_the_provider_client_refuses_a_direct_post_when_the_gate_is_on(monkeypat
 def test_a_local_model_tool_is_not_called_unless_the_witness_dispatches(monkeypatch, tmp_path):
     policy = tmp_path / "open.json"
     _open_policy(policy)
+    executor_setup.arm_caller(monkeypatch, tmp_path)
+    executor_setup.grant_caller(policy, "chat_completion")
     monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
     calls = []
 

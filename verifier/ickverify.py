@@ -50,8 +50,8 @@ SIGNATURE_PREFIX = "ed25519:"
 
 # Fields each entry kind is built from. Anything else in a line is not covered by the entry's hash.
 RECEIPT_FIELDS = {"version", "receipt_id", "previous_receipt_hash", "proposal_hash", "policy_hash",
-                  "decision_hash", "verdict", "reason_codes", "issued_at", "call_digest", "key_id",
-                  "signature"}
+                  "decision_hash", "verdict", "reason_codes", "issued_at", "call_digest", "caller_id",
+                  "key_id", "signature"}
 OUTCOME_FIELDS = {"version", "receipt_id", "previous_receipt_hash", "decision_receipt_id", "status",
                   "request_sha256", "response_sha256", "issued_at", "key_id", "signature"}
 
@@ -241,6 +241,11 @@ def parse_entry(line: str) -> Dict[str, Any]:
             if not isinstance(digest, str):
                 raise ValueError("call_digest must be text")
             fields["call_digest"] = digest
+        if "caller_id" in raw:
+            caller_id = raw["caller_id"]
+            if not isinstance(caller_id, str):
+                raise ValueError("caller_id must be text")
+            fields["caller_id"] = caller_id
         known = RECEIPT_FIELDS
     fields["key_id"], fields["signature"] = _opt_str(raw, "key_id"), _opt_str(raw, "signature")
     fields["kind"] = kind
@@ -264,6 +269,8 @@ def expected_id(entry: Dict[str, Any]) -> Optional[str]:
             material["issued_at"] = entry["issued_at"]
             if "call_digest" in entry:
                 material["call_digest"] = entry["call_digest"]
+            if "caller_id" in entry:
+                material["caller_id"] = entry["caller_id"]
     return "receipt:" + hash_value(material)
 
 
@@ -519,10 +526,17 @@ def _call_body(call: Dict[str, Any]) -> bytes:
     return b""
 
 
-def call_digest(call: Any) -> str:
+def _caller_bytes(caller_id: str) -> bytes:
+    if not isinstance(caller_id, str) or caller_id == "" or any(char in caller_id for char in "\r\n\x00"):
+        raise CallShapeError("caller id must be text")
+    return caller_id.encode("utf-8")
+
+
+def call_digest(call: Any, caller_id: str) -> str:
     """``sha256:<64 hex>`` over the same bytes ``runtime/call_binding.py`` hashes.
 
-    Raises CallShapeError for a shape, field, or encoding that implementation refuses.
+    ``caller_id`` is the second length-prefixed field of both shapes. Raises CallShapeError
+    for a shape, field, or encoding that implementation refuses, including a missing caller id.
     """
     if not isinstance(call, dict):
         raise CallShapeError("call must be an object")
@@ -556,7 +570,8 @@ def call_digest(call: Any) -> str:
         if present != ("authorization" in headers):
             raise CallShapeError("authorization presence does not match the header")
         parts = [
-            b"https_request", method.encode("utf-8"), scheme.encode("utf-8"), host.encode("utf-8"),
+            b"https_request", _caller_bytes(caller_id), method.encode("utf-8"), scheme.encode("utf-8"),
+            host.encode("utf-8"),
             str(port).encode("ascii"), path.encode("utf-8"), query.encode("utf-8"),
             headers.get("content-type", "").encode("utf-8"),
             headers.get("content-encoding", "").encode("utf-8"),
@@ -577,7 +592,9 @@ def call_digest(call: Any) -> str:
             encoded = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         except (TypeError, ValueError) as exc:
             raise CallShapeError("arguments are not JSON") from exc
-        parts = [b"local_model_tool", tool.encode("utf-8"), encoded.encode("utf-8")]
+        parts = [
+            b"local_model_tool", _caller_bytes(caller_id), tool.encode("utf-8"), encoded.encode("utf-8"),
+        ]
     else:
         raise CallShapeError("call shape is not in the registry")
     return "sha256:" + hashlib.sha256(_length_prefixed(parts)).hexdigest()
@@ -599,12 +616,15 @@ def read_call_binds(text: str) -> List[Dict[str, Any]]:
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("receipt_id"), str) or "call" not in item:
             raise Problem("each call binding needs receipt_id and call")
-        binds.append({"receipt_id": item["receipt_id"], "call": item["call"]})
+        bind = {"receipt_id": item["receipt_id"], "call": item["call"]}
+        if "caller_id" in item:
+            bind["caller_id"] = item["caller_id"]
+        binds.append(bind)
     return binds
 
 
 def _witness_material(entry: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    material = {
         "version": entry["version"],
         "previous_receipt_hash": entry["previous_receipt_hash"],
         "allow_receipt_id": entry["allow_receipt_id"],
@@ -614,6 +634,9 @@ def _witness_material(entry: Dict[str, Any]) -> Dict[str, Any]:
         "divergence": entry["divergence"],
         "issued_at": entry["issued_at"],
     }
+    if entry.get("caller_id") is not None:
+        material["caller_id"] = entry["caller_id"]
+    return material
 
 
 def parse_witness_entry(line: str) -> Dict[str, Any]:
@@ -629,6 +652,7 @@ def parse_witness_entry(line: str) -> Dict[str, Any]:
         "previous_receipt_hash": _opt_str(raw, "previous_receipt_hash"),
         "allow_receipt_id": _opt_str(raw, "allow_receipt_id"),
         "call_digest": _opt_str(raw, "call_digest"),
+        "caller_id": _opt_str(raw, "caller_id"),
         "attempt": attempt,
         "status": _opt_str(raw, "status"),
         "divergence": _opt_str(raw, "divergence"),
@@ -701,23 +725,36 @@ def call_bind_problems(entries: List[Dict[str, Any]], binds: List[Dict[str, Any]
     executions = [row for row in (witness_entries or []) if row["version"] == WITNESS_EXECUTION]
     for bind in binds:
         receipt_id, call = bind["receipt_id"], bind["call"]
-        try:
-            digest = call_digest(call)
-        except CallShapeError as exc:
-            problems.append(f"call for {receipt_id} is not a known shape ({exc})")
-            continue
         decision = decisions.get(receipt_id)
         if decision is None:
             problems.append(f"call for {receipt_id} does not name a receipt in this log")
             continue
+        caller_id = decision.get("caller_id")
         if "call_digest" not in decision:
             problems.append(f"omitted call_digest: bound call has no call_digest on the allow {receipt_id}")
-        elif decision["call_digest"] != digest:
+        if not isinstance(caller_id, str) or caller_id == "":
+            problems.append(f"omitted caller id: bound call has no caller id on the allow {receipt_id}")
+            continue
+        stated_caller = bind.get("caller_id")
+        if stated_caller is not None and stated_caller != caller_id:
+            problems.append(f"forged caller id: receipt {receipt_id} does not match the caller on the call")
+        try:
+            digest = call_digest(call, caller_id)
+        except CallShapeError as exc:
+            problems.append(f"call for {receipt_id} is not a known shape ({exc})")
+            continue
+        if "call_digest" in decision and decision["call_digest"] != digest:
             problems.append(f"forged call_digest: receipt {receipt_id} does not match the concrete call")
         for row in executions:
-            if row.get("allow_receipt_id") == receipt_id and row.get("call_digest") != digest:
+            if row.get("allow_receipt_id") != receipt_id:
+                continue
+            if row.get("call_digest") != digest:
                 problems.append(
                     f"mismatch: execution digest does not match the recomputed call for {receipt_id}"
+                )
+            if row.get("caller_id") != caller_id:
+                problems.append(
+                    f"forged caller id: execution for {receipt_id} does not match the allow"
                 )
     return problems
 
@@ -740,6 +777,10 @@ def witness_join_problems(entries: List[Dict[str, Any]], witness_entries: List[D
                 problems.append(f"reused: divergence for {allow_id}")
             elif kind == "late":
                 problems.append(f"late: divergence for {allow_id}")
+            elif kind == "IDENTITY_UNVERIFIED":
+                problems.append(f"IDENTITY_UNVERIFIED: divergence for {allow_id}")
+            elif kind == "AUTHORITY_DENIED":
+                problems.append(f"AUTHORITY_DENIED: divergence for {allow_id}")
             else:
                 problems.append(f"witness divergence {kind!r} for {allow_id}")
             continue
@@ -756,6 +797,9 @@ def witness_join_problems(entries: List[Dict[str, Any]], witness_entries: List[D
         allow_digest = decision.get("call_digest")
         if allow_digest is None or row.get("call_digest") != allow_digest:
             problems.append(f"mismatch: execution digest differs from the allow {allow_id}")
+        allow_caller = decision.get("caller_id")
+        if isinstance(allow_caller, str) and row.get("caller_id") != allow_caller:
+            problems.append(f"forged caller id: execution for {allow_id} does not match the allow")
     for allow_id, count in started.items():
         if count > 1:
             problems.append(f"reused: allow {allow_id} has more than one execution")

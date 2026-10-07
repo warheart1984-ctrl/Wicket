@@ -55,9 +55,25 @@ def test_a_policy_can_only_restrict(tmp_path):
     # adding forbidden effects to the "approval" list or listing them anywhere does not unlock them
     d = decide(tmp_path, {"effects_requiring_approval": ["deploy"], "denied_effects": []}, effect="deploy")
     assert d["verdict"] == "deny" and d["reason_codes"] == ["FORBIDDEN_EFFECT"]
-    # and a policy has no way to say "allow": the contract has no field for it
+    # the three lists still cannot say "allow". callers is a separate grant, checked below.
     properties = set(json.loads((CONTRACTS / "policy.v1.json").read_text())["properties"])
-    assert properties == {"version", "policy_id", "denied_effects", "effects_requiring_approval", "risks_requiring_approval"}
+    assert properties == {
+        "version", "policy_id", "denied_effects", "effects_requiring_approval",
+        "risks_requiring_approval", "callers",
+    }
+
+
+def test_a_callers_map_is_a_grant_and_its_absence_leaves_the_old_behavior(tmp_path):
+    grant = {"effects": ["read"], "target_prefixes": ["demo"], "risk": "low", "action": "act"}
+    assert decide(tmp_path, {"callers": {"alice": grant}})["reason_codes"] == ["AUTHORITY_DENIED"]
+    assert decide(tmp_path, {"callers": {"alice": grant}}, caller_id="bob", target="demo")["reason_codes"] == ["AUTHORITY_DENIED"]
+    assert decide(tmp_path, {"callers": {"alice": grant}}, caller_id="alice", target="other")["reason_codes"] == ["AUTHORITY_DENIED"]
+    assert decide(tmp_path, {"callers": {"alice": grant}}, caller_id="alice", target="demo", effect="write")["reason_codes"] == ["AUTHORITY_DENIED"]
+    assert decide(tmp_path, {"callers": {"alice": grant}}, caller_id="alice", target="demo", risk="high")["reason_codes"] == ["AUTHORITY_DENIED"]
+    allowed = decide(tmp_path, {"callers": {"alice": grant}}, caller_id="alice", target="demo")
+    assert allowed["verdict"] == "allow"
+    # no callers map: a caller_id does not change the verdict. infinityctl does not verify a token.
+    assert decide(tmp_path, {}, caller_id="alice")["verdict"] == "allow"
 
 
 def test_the_actor_is_recorded_and_hashed_but_changes_no_decision(tmp_path):
@@ -78,5 +94,7 @@ def test_the_documents_say_these_things():
     actor_text = json.loads((CONTRACTS / "proposal.v1.json").read_text())["properties"]["actor"]["description"]
     assert "never reads it" in actor_text and "not authenticated" in actor_text
     threat = (root / "THREAT_MODEL.md").read_text(encoding="utf-8")
-    assert "Who is asking is not checked" in threat and "A policy can only restrict" in threat
+    assert "The `actor` field is not checked" in threat
+    assert "Whoever can write the caller key file can add callers" in threat
+    assert "The three lists can only restrict" in threat
     assert "What a policy can and cannot say" in (root / "README.md").read_text(encoding="utf-8")

@@ -190,7 +190,9 @@ def test_local_model_tool_is_gated(monkeypatch, deny_policy, tmp_path):
     from nova.node.tools import local_model
 
     calls = _count_calls(monkeypatch, local_model, ["_ollama_generate", "_vllm_generate"])
-    monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))
+    policy = tmp_path / "demo.json"
+    policy.write_text(DEMO_POLICY.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
 
     def dispatch(bound):
         args = json.loads(bound.arguments_json)
@@ -253,7 +255,9 @@ def _gossip_setup(monkeypatch, tmp_path):
 
 def test_gossip_waits_for_approval_under_the_demo_policy(monkeypatch, tmp_path):
     federation, sent = _gossip_setup(monkeypatch, tmp_path)
-    monkeypatch.setenv("NOVA_ICK_POLICY", str(DEMO_POLICY))  # writes need approval
+    policy = tmp_path / "demo.json"
+    policy.write_text(DEMO_POLICY.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))  # writes need approval
     monkeypatch.delenv("NOVA_ICK_WITNESS", raising=False)
     monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
 
@@ -261,7 +265,7 @@ def test_gossip_waits_for_approval_under_the_demo_policy(monkeypatch, tmp_path):
         sent.append(bound.url)
         return b"{}"
 
-    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch, action="gossip_to_peer"):
         results = federation.gossip_to_peers()
     assert [r["status"] for r in results] == ["refused", "refused"]
     assert results[0]["error"] == "KERNEL_AWAITING_APPROVAL"
@@ -275,6 +279,8 @@ def test_gossip_goes_out_only_through_the_witness_when_the_policy_allows_writes(
                                   "denied_effects": [], "effects_requiring_approval": []}))
     monkeypatch.setenv("NOVA_ICK_POLICY", str(policy))
     monkeypatch.delenv("WICKET_ALLOW_DIRECT_CALLS", raising=False)
+    executor_setup.arm_caller(monkeypatch, tmp_path)
+    executor_setup.grant_caller(policy, "gossip_to_peer")
     blocked = federation.gossip_to_peers()
     assert [r["status"] for r in blocked] == ["refused", "refused"]
     assert blocked[0]["error"] == "WITNESS_UNAVAILABLE"
@@ -285,7 +291,7 @@ def test_gossip_goes_out_only_through_the_witness_when_the_policy_allows_writes(
         sent.append(bound.url)
         return b"{}"
 
-    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch, action="gossip_to_peer"):
         results = federation.gossip_to_peers()
     assert [r["status"] for r in results] == ["sent", "sent"]
     assert sent == [
@@ -329,7 +335,7 @@ def test_gossip_denies_an_unknown_shape_and_does_not_send(monkeypatch, tmp_path)
         sent.append(bound.url)
         return b"{}"
 
-    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch):
+    with executor_setup.install_witness(monkeypatch, tmp_path, dispatch, action="gossip_to_peer"):
         results = federation.gossip_to_peers()
     assert results == [{"peer_id": "v6", "status": "refused", "error": "UNKNOWN_CALL_SHAPE"}]
     assert sent == []
@@ -383,9 +389,9 @@ def test_each_path_through_the_gate_names_itself_as_the_actor(monkeypatch, tmp_p
     seen = []
     real_run = IckGate._run
 
-    def spy(self, proposal, approval_ids, call=None):
+    def spy(self, proposal, approval_ids, call=None, authorization=None):
         seen.append((proposal["action"], proposal["actor"]))
-        return real_run(self, proposal, approval_ids, call)
+        return real_run(self, proposal, approval_ids, call, authorization=authorization)
 
     monkeypatch.setattr(IckGate, "_run", spy)
     allow = tmp_path / "allow.json"
@@ -411,6 +417,7 @@ def test_each_path_through_the_gate_names_itself_as_the_actor(monkeypatch, tmp_p
     # 3. gossip (the kernel is asked with the derived call; without a witness nothing is sent)
     monkeypatch.setattr(federation, "load_peers", lambda: [{"peer_id": "p1", "endpoint": "http://peer.test"}])
     monkeypatch.setattr(federation, "signed_gossip_summary", lambda: {"summary": {}, "signature": "s"})
+    executor_setup.grant_caller(allow, "gossip_to_peer")
     refused = federation.gossip_to_peers()
     assert refused[0]["status"] == "refused" and refused[0]["error"] == "WITNESS_UNAVAILABLE"
 

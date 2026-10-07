@@ -32,13 +32,16 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
 from nova.errors import ProviderError
 from nova.executor import WitnessReply, current_witness
 from nova.ick_approvals import DEFAULT_PENDING_TTL, ApprovalStore
-from runtime.call_binding import UnknownCallShape, bind_proposal, derive
+from runtime.call_binding import BindingError, UnknownCallShape, derive, ensure_known_shape
+from runtime.caller_auth import prepare_bound_proposal
+from runtime.caller_token import present_authorization
 
 _HERE = Path(__file__).resolve()
 _EXE = "infinityctl.exe" if os.name == "nt" else "infinityctl"  # what `cargo build` produces
@@ -191,6 +194,7 @@ class IckGate:
         proposal: dict[str, Any],
         approval_ids: list[str],
         call: dict[str, Any] | None = None,
+        authorization: str | None = None,
     ) -> dict[str, Any]:
         """Ask the kernel once. Any failure to get an answer is a refusal (fail closed)."""
         if self.service is not None:
@@ -199,6 +203,8 @@ class IckGate:
             }
             if call is not None:
                 request["call"] = call
+                if authorization is not None:
+                    request["authorization"] = authorization
             return _call_service(self.service, request)
         try:
             binary = _find_binary(self.binary)
@@ -290,6 +296,7 @@ class IckGate:
         risk: str = "low",
         source: str = "model-provider",
         call: dict[str, Any] | None = None,
+        authorization: str | None = None,
     ) -> dict[str, str]:
         """Return {"verdict", "receipt_id"} if allowed; raise KernelRefusal otherwise.
 
@@ -310,9 +317,21 @@ class IckGate:
             action=action, effect=effect, risk=risk, source=source,
         )
         service_call = call if self.service is not None else None
+        if call is not None and authorization is None:
+            authorization = present_authorization(call)
         if call is not None and self.service is None:
-            proposal = bind_proposal(proposal, call)
-        out = self._run(proposal, [], service_call)
+            try:
+                proposal = prepare_bound_proposal(
+                    proposal,
+                    call,
+                    authorization,
+                    self.policy.read_text(encoding="utf-8"),
+                    _caller_keys_text(),
+                    time.time(),
+                )
+            except (OSError, BindingError) as exc:
+                raise KernelRefusal(code="KERNEL_UNAVAILABLE", message=str(exc)) from exc
+        out = self._run(proposal, [], service_call, authorization=authorization if service_call is not None else None)
         verdict = str(out["decision"]["verdict"])
         receipt_id = str(out["receipt"]["receipt_id"])
         evidence = _evidence(proposal)
@@ -338,6 +357,7 @@ class IckGate:
                     {**proposal, "approval_id": entry["approval_id"]},
                     [entry["approval_id"]],
                     service_call,
+                    authorization=authorization if service_call is not None else None,
                 )
                 if str(approved["decision"]["verdict"]) == "allow":
                     return {
@@ -369,10 +389,12 @@ class IckGate:
         failure comes back as a reply with ``status == "failed"`` (the allow is consumed).
         """
         try:
-            derived = derive(call)
-            target, effect = derived.target, derived.effect
+            ensure_known_shape(call)
+            derived_target, derived_effect = _preview_target(call)
+            target, effect = derived_target, derived_effect
         except UnknownCallShape:
             target, effect = "unbound", "read"
+        authorization = present_authorization(call)
         ick = self.check(
             target=target,
             governed_request=governed_request,
@@ -381,6 +403,7 @@ class IckGate:
             risk=risk,
             source=source,
             call=call,
+            authorization=authorization,
         )
         witness = current_witness()
         if witness is None:
@@ -390,7 +413,7 @@ class IckGate:
                 receipt_id=ick.get("receipt_id"),
             )
         try:
-            reply = witness.execute(call, ick["receipt_id"])
+            reply = witness.execute(call, ick["receipt_id"], authorization=authorization)
         except OSError as exc:
             raise KernelRefusal(code="WITNESS_UNAVAILABLE", message=str(exc), receipt_id=ick.get("receipt_id")) from exc
         if not reply.dispatched:
@@ -400,6 +423,19 @@ class IckGate:
                 receipt_id=ick.get("receipt_id"),
             )
         return reply, ick
+
+
+def _caller_keys_text() -> str:
+    path = os.environ.get("WICKET_CALLER_KEYS", "").strip()
+    if not path:
+        return ""
+    return Path(path).read_text(encoding="utf-8")
+
+
+def _preview_target(call: dict[str, Any]) -> tuple[str, str]:
+    """Effect and target of a known shape. The caller id does not change either one."""
+    derived = derive(call, "shape-check")
+    return derived.target, derived.effect
 
 
 def _evidence(proposal: dict[str, Any]) -> dict[str, str]:

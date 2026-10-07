@@ -25,6 +25,10 @@ pub struct WitnessEntry {
     pub status: Option<String>,
     pub divergence: Option<String>,
     pub issued_at: String,
+    /// Verified caller id. Covered by the entry hash when present, and omitted when it is not,
+    /// so entries written before this field keep their ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,6 +48,8 @@ struct WitnessInput {
     #[serde(default)]
     divergence: Option<String>,
     issued_at: String,
+    #[serde(default)]
+    caller_id: Option<String>,
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -59,7 +65,7 @@ fn is_receipt_id(value: &str) -> bool {
 }
 
 fn material(entry: &WitnessEntry) -> Value {
-    json!({
+    let mut value = json!({
         "version": entry.version,
         "previous_receipt_hash": entry.previous_receipt_hash,
         "allow_receipt_id": entry.allow_receipt_id,
@@ -68,7 +74,11 @@ fn material(entry: &WitnessEntry) -> Value {
         "status": entry.status,
         "divergence": entry.divergence,
         "issued_at": entry.issued_at,
-    })
+    });
+    if let Some(caller_id) = &entry.caller_id {
+        value["caller_id"] = json!(caller_id);
+    }
+    value
 }
 
 fn check_shape(entry: &WitnessEntry) -> Result<(), String> {
@@ -86,6 +96,11 @@ fn check_shape(entry: &WitnessEntry) -> Result<(), String> {
     if let Some(allow) = &entry.allow_receipt_id {
         if !is_receipt_id(allow) {
             return Err("allow_receipt_id must be a receipt id".into());
+        }
+    }
+    if let Some(caller_id) = &entry.caller_id {
+        if caller_id.is_empty() {
+            return Err("caller_id must be non-empty when present".into());
         }
     }
     match entry.version.as_str() {
@@ -110,9 +125,17 @@ fn check_shape(entry: &WitnessEntry) -> Result<(), String> {
             }
             if !matches!(
                 entry.divergence.as_deref(),
-                Some("mismatch") | Some("unauthorized") | Some("reused") | Some("late")
+                Some("mismatch")
+                    | Some("unauthorized")
+                    | Some("reused")
+                    | Some("late")
+                    | Some("IDENTITY_UNVERIFIED")
+                    | Some("AUTHORITY_DENIED")
             ) {
-                return Err("divergence must be mismatch, unauthorized, reused, or late".into());
+                return Err(
+                    "divergence must be mismatch, unauthorized, reused, late, IDENTITY_UNVERIFIED, or AUTHORITY_DENIED"
+                        .into(),
+                );
             }
             Ok(())
         }
@@ -263,6 +286,7 @@ pub fn append(path: &str, signer: &Signer, input_json: &str) -> Result<WitnessEn
         status: input.status,
         divergence: input.divergence,
         issued_at: input.issued_at,
+        caller_id: input.caller_id,
         key_id: None,
         signature: None,
     };

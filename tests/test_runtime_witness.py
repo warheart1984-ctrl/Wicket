@@ -31,12 +31,31 @@ def test_run_turn_does_not_call_the_provider_unless_the_witness_dispatches(tmp_p
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     signer_priv, signer_pub = keygen(tmp_path, "signer")
     witness_priv, _witness_pub = keygen(tmp_path, "witness")
+    caller_priv, caller_pub = keygen(tmp_path, "caller")
+    caller_keys = tmp_path / "caller-keys.json"
+    caller_keys.write_text(json.dumps({
+        "version": "wicket.caller-keys.v1",
+        "keys": [{
+            "caller_id": "runtime-caller",
+            "public_key": caller_pub.read_text(encoding="utf-8").strip(),
+        }],
+    }))
+    monkeypatch.setenv("WICKET_CALLER_KEY", str(caller_priv))
+    monkeypatch.setenv("WICKET_CALLER_KEYS", str(caller_keys))
     policy = tmp_path / "policy.json"
     policy.write_text(json.dumps({
         "version": "infinity.policy.v1",
         "policy_id": "policy-open-v1",
         "denied_effects": [],
         "effects_requiring_approval": [],
+        "callers": {
+            "runtime-caller": {
+                "effects": ["read", "write"],
+                "target_prefixes": ["https://", "http://"],
+                "risk": "low",
+                "action": "chat_completion",
+            },
+        },
     }))
     log = tmp_path / "receipts.jsonl"
     kernel = Kernel(policy, log, binary=BINARY, sign_key=signer_priv)
@@ -61,7 +80,7 @@ def test_run_turn_does_not_call_the_provider_unless_the_witness_dispatches(tmp_p
             "headers": {"Content-Type": "application/json", "Authorization": "Bearer test-key"},
             "authorization_present": True,
             "body": bound.body.decode("utf-8"),
-        }).call_digest
+        }, bound.caller_id).call_digest
         payload = json.loads(bound.body.decode("utf-8"))
         return json.dumps(client(bound.url, payload, dict(bound.headers))).encode("utf-8")
 
@@ -72,6 +91,8 @@ def test_run_turn_does_not_call_the_provider_unless_the_witness_dispatches(tmp_p
         witness_key=witness_priv,
         receipt_trusted_keys=signer_pub,
         dispatch=dispatch,
+        caller_keys=caller_keys,
+        policy=policy,
     )
     result = run_turn("Capital of France?", "groq", kernel, client=client, witness=witness)
     assert result.verdict == "allow" and result.reply == "Paris."
