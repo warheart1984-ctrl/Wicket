@@ -208,23 +208,31 @@ class _Handler(socketserver.StreamRequestHandler):
         self.wfile.write(json.dumps(payload).encode() + b"\n")
 
 
-class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    daemon_threads = True
+# Defined only where the platform has Unix sockets, so importing this module on Windows
+# (the in-process signer tests do) does not die at class creation.
+_UnixServer = getattr(socketserver, "UnixStreamServer", None)
+if _UnixServer is None:
+    class _Server:  # type: ignore[no-redef]
+        def __init__(self, path: str, service: Service, allow_uids: frozenset[int]) -> None:
+            raise OSError("the signer listens on a Unix socket, which this platform does not have")
+else:
+    class _Server(socketserver.ThreadingMixIn, _UnixServer):
+        daemon_threads = True
 
-    def __init__(self, path: str, service: Service, allow_uids: frozenset[int]) -> None:
-        self.service = service
-        self.allow_uids = allow_uids
-        super().__init__(path, _Handler)
+        def __init__(self, path: str, service: Service, allow_uids: frozenset[int]) -> None:
+            self.service = service
+            self.allow_uids = allow_uids
+            super().__init__(path, _Handler)
 
-    def peer_allowed(self, conn: socket.socket) -> bool:
-        if not self.allow_uids:
-            return True  # the socket's file permissions are the gate
-        try:
-            _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
-                                                            struct.calcsize("3i")))
-        except (OSError, AttributeError):
-            return False
-        return uid in self.allow_uids or uid == os.getuid()
+        def peer_allowed(self, conn: socket.socket) -> bool:
+            if not self.allow_uids:
+                return True  # the socket's file permissions are the gate
+            try:
+                _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                                                struct.calcsize("3i")))
+            except (OSError, AttributeError):
+                return False
+            return uid in self.allow_uids or uid == os.getuid()
 
 
 def make_server(service: Service, path: str | Path, *, mode: int = 0o660,
