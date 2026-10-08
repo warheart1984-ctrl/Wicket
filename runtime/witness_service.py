@@ -38,7 +38,10 @@ class WitnessService:
         call, allow_id = request.get("call"), request.get("allow_receipt_id")
         if not isinstance(allow_id, str) or not allow_id:
             raise WitnessError("request", "allow_receipt_id is required")
-        outcome = self.witness.execute(call, allow_id)
+        authorization = request.get("authorization")
+        if authorization is not None and not isinstance(authorization, str):
+            authorization = "malformed"
+        outcome = self.witness.execute(call, allow_id, authorization=authorization)
         body = base64.b64encode(outcome.body).decode("ascii") if outcome.body else None
         return {
             "dispatched": outcome.dispatched,
@@ -127,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--binary")
     serve.add_argument("--allow-ttl", type=float, default=3600)
     serve.add_argument("--socket-mode", default="660")
+    serve.add_argument("--caller-keys", help="caller public keys the witness trusts")
+    serve.add_argument("--policy", help="policy file; a bound call needs a grant for the caller")
     args = parser.parse_args(argv)
     try:
         mode = int(args.socket_mode, 8)
@@ -143,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
             receipt_anchor=Path(args.receipt_anchor) if args.receipt_anchor else None,
             dispatch=dispatch_known,
             allow_ttl=args.allow_ttl,
+            caller_keys=Path(args.caller_keys) if args.caller_keys else None,
+            policy=Path(args.policy) if args.policy else None,
         )
         server = make_server(WitnessService(witness), args.socket, mode=mode)
     except (OSError, WitnessError) as exc:

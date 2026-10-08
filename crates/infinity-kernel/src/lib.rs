@@ -39,6 +39,21 @@ pub struct Proposal {
     /// against any call. Absent when the proposal does not bind one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_digest: Option<String>,
+    /// Caller id taken from the caller key file by the signer. Hashed when present. The kernel
+    /// does not verify a token. It enforces a `callers` grant against this id when the policy
+    /// has one. Absent on proposals that do not bind a caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_id: Option<String>,
+}
+/// One caller's grant. Present only inside `Policy::callers`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CallerGrant {
+    #[serde(default)]
+    pub effects: Vec<String>,
+    #[serde(default)]
+    pub target_prefixes: Vec<String>,
+    pub risk: String,
+    pub action: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
@@ -50,6 +65,11 @@ pub struct Policy {
     pub effects_requiring_approval: Vec<String>,
     #[serde(default)]
     pub risks_requiring_approval: Vec<String>,
+    /// When present, the kernel allows a call only if `caller_id` is listed, the effect is
+    /// allowed, the target matches a prefix, and risk and action equal the grant. When absent,
+    /// those checks are skipped so a policy with no grant map keeps its previous behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callers: Option<BTreeMap<String, CallerGrant>>,
 }
 #[derive(Debug, Clone, Default)]
 pub struct ApprovalSet {
@@ -97,6 +117,10 @@ pub struct Receipt {
     /// when present, so a reader can see the authorized digest without the proposal body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_digest: Option<String>,
+    /// Copied from the proposal. Covered by the receipt hash when present, and omitted when it
+    /// is not, so older receipts keep their ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_id: Option<String>,
     /// Set when the receipt was signed. Not part of the hash: the signature is over the hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
@@ -349,6 +373,44 @@ pub fn evaluate(
         };
         return denied_decision(&proposal, policy_hash, proposal_hash, code);
     }
+    // The signer sets these when it will not trust the credential or the grant. Either one can
+    // only deny. The text does not choose the code, so a caller cannot turn a fault into an allow.
+    if proposal
+        .payload
+        .get("identity_fault")
+        .and_then(Value::as_str)
+        .is_some_and(|fault| !fault.is_empty())
+    {
+        return denied_decision(&proposal, policy_hash, proposal_hash, "IDENTITY_UNVERIFIED");
+    }
+    if proposal
+        .payload
+        .get("authority_fault")
+        .and_then(Value::as_str)
+        .is_some_and(|fault| !fault.is_empty())
+    {
+        return denied_decision(&proposal, policy_hash, proposal_hash, "AUTHORITY_DENIED");
+    }
+    if let Some(callers) = &policy.callers {
+        let granted = proposal
+            .caller_id
+            .as_deref()
+            .and_then(|caller_id| callers.get(caller_id));
+        let allowed = granted.is_some_and(|grant| {
+            grant
+                .effects
+                .iter()
+                .any(|effect| effect == &proposal.effect)
+                && grant.target_prefixes.iter().any(|prefix| {
+                    !prefix.is_empty() && proposal.target.starts_with(prefix.as_str())
+                })
+                && grant.risk == proposal.risk
+                && grant.action == proposal.action
+        });
+        if !allowed {
+            return denied_decision(&proposal, policy_hash, proposal_hash, "AUTHORITY_DENIED");
+        }
+    }
     if policy.denied_effects.contains(&proposal.effect) {
         return denied_decision(
             &proposal,
@@ -416,6 +478,9 @@ fn receipt_material(r: &Receipt) -> Option<Value> {
             if let Some(digest) = &r.call_digest {
                 material["call_digest"] = json!(digest);
             }
+            if let Some(caller_id) = &r.caller_id {
+                material["caller_id"] = json!(caller_id);
+            }
             Some(material)
         }
         _ => None,
@@ -433,6 +498,7 @@ pub fn issue_receipt(
     previous: Option<&LogEntry>,
     issued_at: String,
     call_digest: Option<String>,
+    caller_id: Option<String>,
 ) -> Result<Receipt, KernelError> {
     let mut receipt = Receipt {
         version: RECEIPT_VERSION.into(),
@@ -445,6 +511,7 @@ pub fn issue_receipt(
         reason_codes: decision.reason_codes.clone(),
         issued_at,
         call_digest,
+        caller_id,
         key_id: None,
         signature: None,
     };
@@ -887,6 +954,7 @@ mod tests {
             evidence_refs: vec![],
             approval_id: None,
             call_digest: None,
+            caller_id: None,
         }
     }
     fn policy() -> Policy {
@@ -896,6 +964,7 @@ mod tests {
             denied_effects: vec![],
             effects_requiring_approval: vec!["write".into()],
             risks_requiring_approval: vec![],
+            callers: None,
         }
     }
     #[test]
@@ -979,8 +1048,8 @@ mod tests {
         let with_digest = evaluate(bound, policy(), ApprovalSet::default()).unwrap();
         assert_ne!(plain.proposal_hash, with_digest.proposal_hash);
 
-        let without = issue_receipt(&plain, None, "t".into(), None).unwrap();
-        let with = issue_receipt(&plain, None, "t".into(), Some(digest.into())).unwrap();
+        let without = issue_receipt(&plain, None, "t".into(), None, None).unwrap();
+        let with = issue_receipt(&plain, None, "t".into(), Some(digest.into()), None).unwrap();
         assert_ne!(without.receipt_id, with.receipt_id);
         assert_eq!(with.call_digest.as_deref(), Some(digest));
         assert!(verify_log(&[with.clone().into()]).unwrap());
@@ -990,9 +1059,95 @@ mod tests {
         assert!(!verify_log(&[edited.into()]).unwrap());
     }
     #[test]
+    fn caller_id_is_covered_when_present_and_a_grant_map_denies_outside_it() {
+        let mut named = p("read");
+        named.caller_id = Some("alice".into());
+        let plain = evaluate(p("read"), policy(), ApprovalSet::default()).unwrap();
+        let with_name = evaluate(named, policy(), ApprovalSet::default()).unwrap();
+        assert_eq!(plain.verdict, "allow");
+        assert_eq!(with_name.verdict, "allow");
+        assert_ne!(plain.proposal_hash, with_name.proposal_hash);
+        let receipt =
+            issue_receipt(&with_name, None, "t".into(), None, Some("alice".into())).unwrap();
+        let omitted = issue_receipt(&with_name, None, "t".into(), None, None).unwrap();
+        assert_eq!(receipt.caller_id.as_deref(), Some("alice"));
+        assert_ne!(receipt.receipt_id, omitted.receipt_id);
+        let mut edited = receipt.clone();
+        edited.caller_id = Some("bob".into());
+        assert!(!verify_log(&[edited.into()]).unwrap());
+
+        let granted: Policy = serde_json::from_value(json!({
+            "version": POLICY_VERSION,
+            "policy_id": "p1",
+            "effects_requiring_approval": ["write"],
+            "callers": {
+                "alice": {
+                    "effects": ["read"],
+                    "target_prefixes": ["http://example.test"],
+                    "risk": "low",
+                    "action": "a"
+                }
+            }
+        }))
+        .unwrap();
+        let mut ask = p("read");
+        ask.caller_id = Some("alice".into());
+        ask.target = "http://example.test/status".into();
+        let allowed = evaluate(ask.clone(), granted.clone(), ApprovalSet::default()).unwrap();
+        assert_eq!(allowed.verdict, "allow");
+        let mut missing = ask.clone();
+        missing.caller_id = None;
+        assert_eq!(
+            evaluate(missing, granted.clone(), ApprovalSet::default())
+                .unwrap()
+                .reason_codes,
+            vec!["AUTHORITY_DENIED"]
+        );
+        let mut other = ask.clone();
+        other.caller_id = Some("bob".into());
+        assert_eq!(
+            evaluate(other, granted.clone(), ApprovalSet::default())
+                .unwrap()
+                .reason_codes,
+            vec!["AUTHORITY_DENIED"]
+        );
+        let mut write = ask.clone();
+        write.effect = "write".into();
+        assert_eq!(
+            evaluate(write, granted.clone(), ApprovalSet::default())
+                .unwrap()
+                .reason_codes,
+            vec!["AUTHORITY_DENIED"]
+        );
+        let mut elsewhere = ask.clone();
+        elsewhere.target = "http://other.test/status".into();
+        assert_eq!(
+            evaluate(elsewhere, granted.clone(), ApprovalSet::default())
+                .unwrap()
+                .reason_codes,
+            vec!["AUTHORITY_DENIED"]
+        );
+        let mut raised = ask.clone();
+        raised.risk = "high".into();
+        assert_eq!(
+            evaluate(raised, granted.clone(), ApprovalSet::default())
+                .unwrap()
+                .reason_codes,
+            vec!["AUTHORITY_DENIED"]
+        );
+        let mut other_action = ask;
+        other_action.action = "other".into();
+        assert_eq!(
+            evaluate(other_action, granted, ApprovalSet::default())
+                .unwrap()
+                .reason_codes,
+            vec!["AUTHORITY_DENIED"]
+        );
+    }
+    #[test]
     fn chain_detects_tamper() {
         let d = evaluate(p("read"), policy(), ApprovalSet::default()).unwrap();
-        let mut r = issue_receipt(&d, None, "x".into(), None).unwrap();
+        let mut r = issue_receipt(&d, None, "x".into(), None, None).unwrap();
         assert!(verify_log(&[r.clone().into()]).unwrap());
         r.verdict = "deny".into();
         assert!(!verify_log(&[r.into()]).unwrap());
@@ -1001,7 +1156,7 @@ mod tests {
     fn allow_receipt(previous: Option<&LogEntry>, at: &str) -> Receipt {
         let d = evaluate(p("read"), policy(), ApprovalSet::default()).unwrap();
         assert_eq!(d.verdict, "allow");
-        issue_receipt(&d, previous, at.into(), None).unwrap()
+        issue_receipt(&d, previous, at.into(), None, None).unwrap()
     }
     const HASH_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1158,7 +1313,7 @@ mod tests {
         ] {
             let decision = evaluate(p(effect), policy(), ApprovalSet::default()).unwrap();
             assert_eq!(decision.verdict, verdict);
-            let held: LogEntry = issue_receipt(&decision, None, "t1".into(), None)
+            let held: LogEntry = issue_receipt(&decision, None, "t1".into(), None, None)
                 .unwrap()
                 .into();
             let outcome = issue_outcome(

@@ -85,17 +85,21 @@ These are real limits, not fine print.
    every use and is off by default; it does not derive a digest and it does not apply to gossip).
    Gossip is a derived `https_request` sent by the witness, or it is
    not sent; an unknown shape is `UNKNOWN_CALL_SHAPE`. See `docs/executor-mode.md`.
-1a. **Who is asking is not checked.** Every proposal has an `actor`, but the kernel never reads it and no policy
+1a. **The `actor` field is not checked.** Every proposal has an `actor`, but the kernel never reads it and no policy
    rule can mention it: it is recorded and hashed (so it cannot be edited later), not enforced, and not
    authenticated. Nova names the path that is asking (`nova-shell/model-provider`, `nova-shell/local-model-tool`,
    `nova-shell/gossip`), so the log can tell its paths apart, but that is Nova's own claim: a taken-over Nova
-   can write any name. The same goes for `target` and `effect`: they are the caller's assertions. Making the
-   actor trustworthy needs the signer service to stamp it from the account that connected, and there is
-   only one caller of that service today.
-1b. **A policy can only restrict.** It can deny an effect or make it wait for a human. It cannot grant. The
-   kernel always denies `deploy`, `authority_change` and `audit_delete` before it reads the policy, so the only
-   things that can ever be allowed are `read` and `write`. An empty policy (`denied_effects: []`) is the
-   *least* restrictive one possible, not a wide-open one, and there is no way to enable `deploy`.
+   can write any name. A bound call is different. The signer and the witness verify `Authorization: Wicket <token>`
+   against a caller key file and record the caller id from that file, not the caller id string inside the token.
+   The kernel enforces that caller's grant when the policy has a `callers` map. `infinityctl evaluate` does not
+   verify the token, so a receipt minted there is not executed. Whoever can write the caller key file can add callers. This is caller A versus caller B, not two operating-system accounts.
+1b. **The three lists can only restrict.** They can deny an effect or make it wait for a human. They cannot grant.
+   The kernel always denies `deploy`, `authority_change` and `audit_delete` before it reads the policy, so the only
+   things that can ever be allowed are `read` and `write`. An empty policy (`denied_effects: []`) with no `callers`
+   map is the *least* restrictive one possible, not a wide-open one, and there is no way to enable `deploy`.
+   When `callers` is present, that map is a per-caller grant: effects, target prefixes, and the risk and action
+   for that caller. A caller with no grant is `AUTHORITY_DENIED`. When `callers` is absent, the kernel's previous
+   behavior remains.
 2. **Not asking at all.** A taken-over caller can skip the gate. The log then has gaps, but nothing in
    the log shows a gap. Absence of an entry is never evidence.
 3. **Whoever holds the signing key.** In the basic setup the key is a file on the machine that writes

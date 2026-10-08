@@ -32,7 +32,9 @@ class WitnessReply:
 
 
 class WitnessEndpoint:
-    def execute(self, call: dict[str, Any], allow_receipt_id: str) -> WitnessReply:
+    def execute(
+        self, call: dict[str, Any], allow_receipt_id: str, authorization: str | None = None
+    ) -> WitnessReply:
         raise NotImplementedError
 
 
@@ -42,8 +44,10 @@ class InProcessWitness(WitnessEndpoint):
     def __init__(self, witness: Witness) -> None:
         self._witness = witness
 
-    def execute(self, call: dict[str, Any], allow_receipt_id: str) -> WitnessReply:
-        outcome = self._witness.execute(call, allow_receipt_id)
+    def execute(
+        self, call: dict[str, Any], allow_receipt_id: str, authorization: str | None = None
+    ) -> WitnessReply:
+        outcome = self._witness.execute(call, allow_receipt_id, authorization=authorization)
         return WitnessReply(
             dispatched=outcome.dispatched,
             divergence=outcome.divergence,
@@ -57,8 +61,14 @@ class SocketWitness(WitnessEndpoint):
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
-    def execute(self, call: dict[str, Any], allow_receipt_id: str) -> WitnessReply:
-        request = {"op": "execute", "call": call, "allow_receipt_id": allow_receipt_id}
+    def execute(
+        self, call: dict[str, Any], allow_receipt_id: str, authorization: str | None = None
+    ) -> WitnessReply:
+        request: dict[str, Any] = {
+            "op": "execute", "call": call, "allow_receipt_id": allow_receipt_id,
+        }
+        if authorization is not None:
+            request["authorization"] = authorization
         reply = _call_socket(self.path, request)
         body = reply.get("body_b64")
         raw = base64.b64decode(body) if isinstance(body, str) else None

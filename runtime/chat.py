@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from runtime.call_binding import bind_proposal, derive, describe_https
+from runtime.call_binding import derive, describe_https
+from runtime.caller_auth import prepare_bound_proposal
+from runtime.caller_token import present_authorization
 from runtime.kernel import Decision, Kernel, KernelError, sha256_text
 from runtime.providers import Client, ProviderError, complete, prepared_request
 from runtime.witness import Witness
@@ -82,13 +86,24 @@ def run_turn(
     """
     messages = list(history or []) + [{"role": "user", "content": message}]
     proposal = build_proposal(provider, message, policy_version_of(kernel))
+    authorization = None
     if witness is not None:
         url, payload, headers = prepared_request(provider, messages, max_tokens=max_tokens)
         call = describe_https("POST", url, headers, json.dumps(payload).encode("utf-8"))
-        derived = derive(call)
-        proposal["effect"] = derived.effect
-        proposal["target"] = derived.target
-        proposal = bind_proposal(proposal, call)
+        preview = derive(call, "shape-check")
+        proposal["effect"] = preview.effect
+        proposal["target"] = preview.target
+        authorization = present_authorization(call)
+        keys_path = os.environ.get("WICKET_CALLER_KEYS", "").strip()
+        keys_text = Path(keys_path).read_text(encoding="utf-8") if keys_path else ""
+        proposal = prepare_bound_proposal(
+            proposal,
+            call,
+            authorization,
+            kernel.policy.read_text(encoding="utf-8"),
+            keys_text,
+            time.time(),
+        )
     else:
         call = None
     decision: Decision = kernel.evaluate(proposal)
@@ -104,7 +119,7 @@ def run_turn(
             reply = complete(provider, messages, max_tokens=max_tokens, client=client)
         else:
             assert call is not None
-            sent = witness.execute(call, receipt_id)
+            sent = witness.execute(call, receipt_id, authorization=authorization)
             if not sent.dispatched or sent.status == "failed":
                 raise ProviderError(sent.error or sent.divergence or "the witness did not send the call")
             parsed = json.loads((sent.body or b"{}").decode("utf-8"))

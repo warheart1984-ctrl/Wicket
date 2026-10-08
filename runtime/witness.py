@@ -26,6 +26,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from runtime.call_binding import BoundCall, UnknownCallShape, derive, describe_https
+from runtime.caller_auth import grant_covers
+from runtime.caller_token import (
+    CallerTokenError,
+    IdentityFailure,
+    TokenLedger,
+    ledger_path_for,
+    load_caller_keys,
+    verify_authorization,
+)
 
 EXECUTION_VERSION = "infinity.witness.execution.v1"
 DIVERGENCE_VERSION = "infinity.witness.divergence.v1"
@@ -76,7 +85,7 @@ def dispatch_local_tool(bound: BoundCall) -> bytes:
     }).encode("utf-8")
     try:
         sent = describe_https("POST", ollama, {"Content-Type": "application/json"}, payload)
-        raw = dispatch_https(derive(sent))
+        raw = dispatch_https(derive(sent, "witness"))
         data = json.loads(raw.decode("utf-8") or "{}")
     except (OSError, ValueError, UnknownCallShape, WitnessError) as exc:
         raise WitnessError("dispatch", str(exc)) from exc
@@ -141,6 +150,8 @@ class Witness:
         dispatch: Callable[[BoundCall], bytes] | None = None,
         allow_ttl: float = 3600,
         clock: Callable[[], float] | None = None,
+        caller_keys: Path | None = None,
+        policy: Path | None = None,
     ) -> None:
         self.binary = binary
         self.receipt_log = Path(receipt_log)
@@ -151,36 +162,60 @@ class Witness:
         self.dispatch = dispatch if dispatch is not None else dispatch_https
         self.allow_ttl = allow_ttl
         self.clock = clock if clock is not None else time.time
+        self.caller_keys = Path(caller_keys) if caller_keys is not None else None
+        self.policy = Path(policy) if policy is not None else None
+        self.tokens = TokenLedger(ledger_path_for(self.witness_log))
 
-    def execute(self, call: Any, allow_receipt_id: str) -> WitnessOutcome:
-        """Check ``allow_receipt_id``, consume it, then perform ``call``. Refusal does not dispatch."""
+    def execute(
+        self, call: Any, allow_receipt_id: str, authorization: str | None = None
+    ) -> WitnessOutcome:
+        """Check the caller, the grant, and ``allow_receipt_id``, then perform ``call``.
+
+        A refusal is recorded and nothing is sent. Credential failures, including a replay
+        and a token that claims another caller, are ``IDENTITY_UNVERIFIED``. A verified
+        caller outside its grant is ``AUTHORITY_DENIED``.
+        """
         try:
-            derived = derive(call)
-            digest: str | None = derived.call_digest
+            verified = verify_authorization(
+                authorization,
+                call,
+                self._caller_keys(),
+                now=self.clock(),
+                ledger=self.tokens,
+            )
+        except IdentityFailure:
+            return self._diverge("IDENTITY_UNVERIFIED", None, allow_receipt_id)
+        if verified.unbound or verified.call_digest is None:
+            return self._diverge("mismatch", None, allow_receipt_id, verified.caller_id)
+        digest = verified.call_digest
+        caller_id = verified.caller_id
+        try:
+            derived = derive(call, caller_id)
         except UnknownCallShape:
-            derived = None
-            digest = None
+            return self._diverge("mismatch", None, allow_receipt_id, caller_id)
+        if not self._grant_ok(caller_id, derived.effect, derived.target):
+            return self._diverge("AUTHORITY_DENIED", digest, allow_receipt_id, caller_id)
         if not self._receipt_log_ok():
-            return self._diverge("unauthorized", digest, allow_receipt_id)
+            return self._diverge("unauthorized", digest, allow_receipt_id, caller_id)
         receipt = self._find_receipt(allow_receipt_id)
         if receipt is None or receipt.get("verdict") != "allow":
-            return self._diverge("unauthorized", digest, allow_receipt_id)
-        if derived is None or digest != receipt.get("call_digest"):
-            return self._diverge("mismatch", digest, allow_receipt_id)
+            return self._diverge("unauthorized", digest, allow_receipt_id, caller_id)
+        if digest != receipt.get("call_digest") or receipt.get("caller_id") != caller_id:
+            return self._diverge("mismatch", digest, allow_receipt_id, caller_id)
         if self._consumed(allow_receipt_id):
-            return self._diverge("reused", digest, allow_receipt_id)
+            return self._diverge("reused", digest, allow_receipt_id, caller_id)
         if self._expired(receipt.get("issued_at")):
-            return self._diverge("late", digest, allow_receipt_id)
+            return self._diverge("late", digest, allow_receipt_id, caller_id)
         try:
-            started = self._append(self._execution("started", digest, allow_receipt_id))
+            started = self._append(self._execution("started", digest, allow_receipt_id, caller_id))
         except WitnessError as exc:
             if "allow already consumed" in str(exc):
-                return self._diverge("reused", digest, allow_receipt_id)
+                return self._diverge("reused", digest, allow_receipt_id, caller_id)
             raise
         try:
             body = self.dispatch(derived)
         except Exception as exc:  # the allow is already consumed; record the failure
-            failed = self._append(self._execution("failed", digest, allow_receipt_id))
+            failed = self._append(self._execution("failed", digest, allow_receipt_id, caller_id))
             return WitnessOutcome(
                 dispatched=True,
                 divergence=None,
@@ -190,7 +225,7 @@ class Witness:
                 body=None,
                 error=str(exc),
             )
-        completed = self._append(self._execution("completed", digest, allow_receipt_id))
+        completed = self._append(self._execution("completed", digest, allow_receipt_id, caller_id))
         return WitnessOutcome(
             dispatched=True,
             divergence=None,
@@ -200,11 +235,33 @@ class Witness:
             body=body,
         )
 
-    def _execution(self, status: str, digest: str, allow_receipt_id: str) -> dict[str, Any]:
+    def _caller_keys(self) -> dict[bytes, str]:
+        if self.caller_keys is None or not self.caller_keys.is_file():
+            return {}
+        try:
+            return load_caller_keys(self.caller_keys.read_text(encoding="utf-8"))
+        except (OSError, CallerTokenError):
+            return {}
+
+    def _grant_ok(self, caller_id: str, effect: str, target: str) -> bool:
+        if self.policy is None or not self.policy.is_file():
+            return False
+        try:
+            policy = json.loads(self.policy.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(policy, dict):
+            return False
+        return grant_covers(policy, caller_id, effect, target)
+
+    def _execution(
+        self, status: str, digest: str, allow_receipt_id: str, caller_id: str
+    ) -> dict[str, Any]:
         return {
             "version": EXECUTION_VERSION,
             "allow_receipt_id": allow_receipt_id,
             "call_digest": digest,
+            "caller_id": caller_id,
             "attempt": 1,
             "status": status,
             "divergence": None,
@@ -212,19 +269,24 @@ class Witness:
         }
 
     def _diverge(
-        self, kind: str, digest: str | None, allow_receipt_id: str | None
+        self,
+        kind: str,
+        digest: str | None,
+        allow_receipt_id: str | None,
+        caller_id: str | None = None,
     ) -> WitnessOutcome:
-        entry = self._append(
-            {
-                "version": DIVERGENCE_VERSION,
-                "allow_receipt_id": allow_receipt_id,
-                "call_digest": digest,
-                "attempt": 1,
-                "status": None,
-                "divergence": kind,
-                "issued_at": self._issued_at(),
-            }
-        )
+        body: dict[str, Any] = {
+            "version": DIVERGENCE_VERSION,
+            "allow_receipt_id": allow_receipt_id,
+            "call_digest": digest,
+            "attempt": 1,
+            "status": None,
+            "divergence": kind,
+            "issued_at": self._issued_at(),
+        }
+        if caller_id is not None:
+            body["caller_id"] = caller_id
+        entry = self._append(body)
         return WitnessOutcome(
             dispatched=False,
             divergence=kind,

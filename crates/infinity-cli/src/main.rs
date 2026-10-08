@@ -425,7 +425,7 @@ fn append_chained(
     issued_at: String,
 ) -> Result<LogEntry, String> {
     append_entry(path, anchor, None, |previous| {
-        issue_receipt(decision, previous, issued_at, None)
+        issue_receipt(decision, previous, issued_at, None, None)
             .map(LogEntry::Decision)
             .map_err(|e| e.to_string())
     })
@@ -448,20 +448,28 @@ fn run(command: Command) -> Result<(), String> {
             p.and_then(|p| pol.map(|pol| (p, pol)))
                 .and_then(|(p, pol)| {
                     let call_digest = p.call_digest.clone();
+                    let caller_id = p.caller_id.clone();
                     let d = evaluate(p, pol, ApprovalSet::from_ids(approvals))
                         .map_err(|e| e.to_string())?;
                     let r = match &log {
                         Some(path) => {
                             append_entry(path, anchor.as_deref(), signer.as_ref(), |previous| {
-                                issue_receipt(&d, previous, issued_at, call_digest.clone())
-                                    .map(LogEntry::Decision)
-                                    .map_err(|e| e.to_string())
+                                issue_receipt(
+                                    &d,
+                                    previous,
+                                    issued_at,
+                                    call_digest.clone(),
+                                    caller_id.clone(),
+                                )
+                                .map(LogEntry::Decision)
+                                .map_err(|e| e.to_string())
                             })?
                         }
                         None => {
-                            let mut entry = issue_receipt(&d, None, issued_at, call_digest)
-                                .map(LogEntry::Decision)
-                                .map_err(|e| e.to_string())?;
+                            let mut entry =
+                                issue_receipt(&d, None, issued_at, call_digest, caller_id)
+                                    .map(LogEntry::Decision)
+                                    .map_err(|e| e.to_string())?;
                             if let Some(signer) = &signer {
                                 entry.sign(signer);
                             }
@@ -646,6 +654,7 @@ fn run(command: Command) -> Result<(), String> {
                     &decision,
                     previous.as_ref(),
                     format!("demo-sequence-{index}"),
+                    None,
                     None,
                 )
                 .map_err(|e| e.to_string())?;
@@ -927,7 +936,7 @@ mod tests {
     ) -> Result<LogEntry, String> {
         let d = decision(id);
         append_entry(log, anchor, Some(signer), |previous| {
-            issue_receipt(&d, previous, "t".into(), None)
+            issue_receipt(&d, previous, "t".into(), None, None)
                 .map(LogEntry::Decision)
                 .map_err(|e| e.to_string())
         })

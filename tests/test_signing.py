@@ -131,6 +131,8 @@ def _material_id(row):
                 "verdict", "reason_codes", "issued_at"]
         if "call_digest" in row:
             keys.append("call_digest")
+        if "caller_id" in row:
+            keys.append("caller_id")
     else:
         keys = ["version", "previous_receipt_hash", "decision_receipt_id", "status", "request_sha256",
                 "response_sha256", "issued_at"]
