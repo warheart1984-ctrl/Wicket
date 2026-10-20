@@ -107,6 +107,13 @@ The typed contracts are `contracts/receipt.v2.json` and `contracts/outcome.v1.js
   Upgrading changes the hash of every request, so an approval given before the upgrade no longer matches and
   the request must be approved again.
 - Tests pin all of this (`tests/test_policy_semantics.py`), so a change to it cannot happen quietly.
+- **A refusal decided outside the kernel can be recorded, and can only be a refusal.**
+  `record_external_denial(proposal, policy, authority, reason)` (Rust library only) is for a system
+  that refuses for its own reasons, such as a gateway that is out of budget, and wants that on the same
+  chain. It always issues `deny`, with `reason_codes` `["EXTERNAL_DENY", reason]`, so a reader can tell
+  it from every code the kernel issues. Its decision does not claim `kernel_is_sole_verdict_authority`;
+  it names the deciding authority instead. There is no external allow or await. The receipt format,
+  the contracts and `ickverify.py` are unchanged.
 
 ### Contracts for the kernel's input and output
 

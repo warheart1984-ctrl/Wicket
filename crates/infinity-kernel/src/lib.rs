@@ -464,6 +464,76 @@ pub fn evaluate(
         },
     )
 }
+/// The first reason code on every denial recorded with [`record_external_denial`].
+pub const EXTERNAL_DENY: &str = "EXTERNAL_DENY";
+
+fn is_code(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_uppercase())
+        && text.len() <= 64
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn is_authority(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && text.len() <= 64
+        && bytes.all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+}
+
+/// Record a refusal that a system outside the kernel decided, such as a gateway that is out of
+/// budget or over a rate limit, so it can go on the same receipt chain with its real reason.
+///
+/// It can only deny. There is no way to record an allow or an await through it, so it never
+/// widens what the kernel permits. The receipt's `reason_codes` are `["EXTERNAL_DENY", reason]`,
+/// which a reader can tell apart from every code the kernel issues. The decision does not list
+/// `kernel_is_sole_verdict_authority`; it lists `external_verdict_can_only_deny` and names the
+/// deciding authority, and both are covered by the decision hash. The proposal and policy are
+/// hashed exactly as in [`evaluate`], and the receipt format is unchanged.
+///
+/// `reason` must look like a kernel code (`BUDGET_EXHAUSTED`: upper case, digits, underscores,
+/// at most 64 characters) and `authority` a short lower-case name (`llm-gateway`).
+pub fn record_external_denial(
+    proposal: &Proposal,
+    policy: &Policy,
+    authority: &str,
+    reason: &str,
+) -> Result<Decision, KernelError> {
+    if !is_code(reason) {
+        return Err(KernelError::Invalid(format!(
+            "an external denial reason must look like BUDGET_EXHAUSTED, not {reason:?}"
+        )));
+    }
+    if !is_authority(authority) {
+        return Err(KernelError::Invalid(format!(
+            "an external authority must be a short lower-case name, not {authority:?}"
+        )));
+    }
+    let mut decision = Decision {
+        version: DECISION_VERSION.into(),
+        proposal_id: proposal.proposal_id.clone(),
+        verdict: "deny".into(),
+        reason_codes: vec![EXTERNAL_DENY.into(), reason.into()],
+        policy_hash: hash_value(&policy_value(policy))?,
+        proposal_hash: hash_value(&proposal_value(proposal))?,
+        approval: Approval {
+            required: false,
+            approval_id: None,
+        },
+        invariants_checked: vec![
+            "no_authority_self_mutation".into(),
+            "external_verdict_can_only_deny".into(),
+            format!("verdict_authority:{authority}"),
+        ],
+        decision_hash: String::new(),
+    };
+    decision.decision_hash = hash_value(&decision_material(&decision))?;
+    Ok(decision)
+}
 /// What a receipt's id is a hash of. v1 left out `issued_at`, so its time could be edited
 /// unnoticed; v2 includes it. An unknown version has no material and never verifies.
 fn receipt_material(r: &Receipt) -> Option<Value> {
@@ -965,6 +1035,77 @@ mod tests {
             effects_requiring_approval: vec!["write".into()],
             risks_requiring_approval: vec![],
             callers: None,
+        }
+    }
+    #[test]
+    fn an_external_denial_shows_its_origin_and_reason_and_chains_like_any_receipt() {
+        let decision =
+            record_external_denial(&p("read"), &policy(), "llm-gateway", "BUDGET_EXHAUSTED")
+                .unwrap();
+        assert_eq!(decision.verdict, "deny");
+        assert_eq!(
+            decision.reason_codes,
+            vec!["EXTERNAL_DENY", "BUDGET_EXHAUSTED"]
+        );
+        assert!(!decision
+            .invariants_checked
+            .iter()
+            .any(|i| i == "kernel_is_sole_verdict_authority"));
+        assert!(decision
+            .invariants_checked
+            .iter()
+            .any(|i| i == "verdict_authority:llm-gateway"));
+        assert_eq!(
+            decision.decision_hash,
+            hash_value(&decision_material(&decision)).unwrap()
+        );
+
+        // The same proposal and policy hash the same way the kernel hashes them.
+        let own = evaluate(p("read"), policy(), ApprovalSet::default()).unwrap();
+        assert_eq!(decision.proposal_hash, own.proposal_hash);
+        assert_eq!(decision.policy_hash, own.policy_hash);
+        assert_ne!(decision.decision_hash, own.decision_hash);
+
+        let signer = Signer::from_seed([7; 32]);
+        let first: LogEntry = issue_receipt(&own, None, "2026-10-20T00:00:00Z".into(), None, None)
+            .unwrap()
+            .into();
+        let mut second: LogEntry = issue_receipt(
+            &decision,
+            Some(&first),
+            "2026-10-20T00:00:01Z".into(),
+            None,
+            Some("ak".into()),
+        )
+        .unwrap()
+        .into();
+        let mut first = first;
+        first.sign(&signer);
+        second.sign(&signer);
+        let log = vec![first, second];
+        assert!(verify_log(&log).unwrap());
+        let report = verify_signatures(&log, &TrustedKeys::from_signer(&signer), true);
+        assert!(report.is_ok(), "{report:?}");
+    }
+    #[test]
+    fn an_external_denial_cannot_take_a_malformed_reason_or_authority() {
+        for reason in [
+            "",
+            "budget_exhausted",
+            "1_LIMIT",
+            "BUDGET EXHAUSTED",
+            &"A".repeat(65),
+        ] {
+            assert!(
+                record_external_denial(&p("read"), &policy(), "llm-gateway", reason).is_err(),
+                "{reason:?}"
+            );
+        }
+        for authority in ["", "LLM-Gateway", "-gw", "gw/1", &"a".repeat(65)] {
+            assert!(
+                record_external_denial(&p("read"), &policy(), authority, "RATE_LIMITED").is_err(),
+                "{authority:?}"
+            );
         }
     }
     #[test]
